@@ -544,18 +544,12 @@ def create_word_cloud(posts: List[str], brand_names: List[str], kol_names: List[
     keyword_freq = Counter(all_keywords)
     
     try:
-        font_paths = [
-            "/System/Library/Fonts/STHeiti Medium.ttc",
-            "/System/Library/Fonts/PingFang.ttc",
-            "C:\\Windows\\Fonts\\msyh.ttc",
-            "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
-        ]
-        
-        font_path = None
-        for path in font_paths:
-            if os.path.exists(path):
-                font_path = path
-                break
+           # --- Use font inside repo (works on Streamlit Cloud) ---
+    base_dir = os.path.dirname(__file__)
+    font_path = os.path.join(base_dir, "assets", "fonts", "NotoSansSC-Regular.otf")
+
+    if not os.path.exists(font_path):
+        st.warning("Chinese font not found in assets/fonts/. Please upload NotoSansSC-Regular.otf.")
         
         wc = WordCloud(
             width=1200,
