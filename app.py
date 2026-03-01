@@ -543,13 +543,13 @@ def create_word_cloud(posts: List[str], brand_names: List[str], kol_names: List[
     
     keyword_freq = Counter(all_keywords)
     
-    try:
-           # --- Use font inside repo (works on Streamlit Cloud) ---
-    base_dir = os.path.dirname(__file__)
-    font_path = os.path.join(base_dir, "assets", "fonts", "NotoSansSC-Regular.otf")
+    # --- Chinese font (fix garbled wordcloud on Streamlit Cloud) ---
+base_dir = os.path.dirname(__file__)
+font_path = os.path.join(base_dir, "assets", "fonts", "NotoSansSC-Regular.otf")
 
-    if not os.path.exists(font_path):
-        st.warning("Chinese font not found in assets/fonts/. Please upload NotoSansSC-Regular.otf.")
+if not os.path.exists(font_path):
+    font_path = None
+    st.warning("Chinese font not found: assets/fonts/NotoSansSC-Regular.otf. Please upload it to your GitHub repo.")
         
         wc = WordCloud(
             width=1200,
