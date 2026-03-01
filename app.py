@@ -551,31 +551,31 @@ if not os.path.exists(font_path):
     font_path = None
     st.warning("Chinese font not found: assets/fonts/NotoSansSC-Regular.otf. Please upload it to your GitHub repo.")
         
-        wc = WordCloud(
-            width=1200,
-            height=600,
-            background_color='white',
-            font_path=font_path,
-            max_words=100,
-            relative_scaling=0.5,
-            colormap='viridis',
-            prefer_horizontal=0.7,
-            min_font_size=10,
-            max_font_size=100
-        ).generate_from_frequencies(keyword_freq)
-        
-        fig, ax = plt.subplots(figsize=(12, 6), facecolor='white')
-        ax.imshow(wc, interpolation='bilinear')
-        ax.axis('off')
-        ax.set_title(title, fontsize=16, pad=20, weight='bold')
-        
-        plt.tight_layout(pad=0)
-        
-        return fig
-        
-    except Exception as e:
-        st.warning(f"词云生成失败: {str(e)}")
+def generate_wordcloud(keyword_freq, title):
+    if not keyword_freq:
         return None
+
+    wc = WordCloud(
+        width=1200,
+        height=600,
+        background_color='white',
+        font_path=font_path,
+        max_words=100,
+        relative_scaling=0.5,
+        colormap='viridis',
+        prefer_horizontal=0.7,
+        min_font_size=10,
+        max_font_size=100
+    ).generate_from_frequencies(keyword_freq)
+
+    fig, ax = plt.subplots(figsize=(12, 6), facecolor='white')
+    ax.imshow(wc, interpolation='bilinear')
+    ax.axis('off')
+    ax.set_title(title, fontsize=16, pad=20, weight='bold')
+
+    plt.tight_layout(pad=0)
+
+    return fig
 
 # ============================================================
 # 📈 VISUALIZATIONS
