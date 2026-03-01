@@ -1281,34 +1281,32 @@ with tab_dashboard:
                 st.plotly_chart(fig_radar, use_container_width=True)
         
         # Word clouds
-        if enable_wordcloud and WORDCLOUD_AVAILABLE:
-            st.markdown("---")
-            st.markdown("### ☁️ KOL词云对比")
-            
-            st.markdown("""
-            <div class="explanation-box">
-                <div class="explanation-title">📖 词云说明</div>
-                展示各KOL评论区的高频关键词，字体大小代表提及频率。已自动过滤KOL名称和无意义词。
-            </div>
-            """, unsafe_allow_html=True)
-            
-            cols_wc = st.columns(min(len(kol_results), 3))
-            
-            for idx, result in enumerate(kol_results):
-                with cols_wc[idx % 3]:
-                    st.markdown(f"#### {result['kol_name']}")
-                    
-                    if result["total_comments"] > 0:
-                        all_comments = st.session_state.kol_data.get(result["kol_name"], [])
-                        wc_fig = create_word_cloud(
-                            all_comments,
-                            [primary_brand],
-                            [result["kol_name"]],
-                            f"{result['kol_name']} 评论词云"
-                        )
-                        if wc_fig:
-                            st.pyplot(wc_fig)
-                            plt.close()
+        # Word clouds
+if enable_wordcloud and WORDCLOUD_AVAILABLE:
+    st.markdown("---")
+    st.markdown("### 关键词词云")  # ✅ 去掉emoji
+
+    # ✅ 1) 先打印调试信息（让你一眼知道为什么空白）
+    st.write("DEBUG: posts count =", len(primary_data.get("posts", [])))
+    st.write("DEBUG: brand_names count =", len(results.get("brand_names", [])))
+
+    # 显示几条样例评论，确保你传进去的确实是“评论内容”
+    posts_preview = primary_data.get("posts", [])[:3]
+    st.write("DEBUG: sample posts (first 3) =", posts_preview)
+
+    # ✅ 2) 生成词云
+    wc_fig = create_word_cloud(
+        primary_data.get("posts", []),
+        results.get("brand_names", []),
+        title=f"{primary_brand} 高频关键词"
+    )
+
+    # ✅ 3) 显示结果 or 提示失败原因
+    if wc_fig is not None:
+        st.pyplot(wc_fig, clear_figure=True)  # ✅ 用最稳定的显示方式
+        plt.close(wc_fig)
+    else:
+        st.warning("词云没有生成出来：通常是因为关键词被过滤到为空，或文本列读取错误。请看上面的 DEBUG 信息。")
     
     elif st.session_state.analysis_results:
         # Regular analysis display
