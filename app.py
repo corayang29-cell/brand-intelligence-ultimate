@@ -1,1793 +1,910 @@
-import streamlit as st
 import os
 import re
-import json
-import pandas as pd
+import math
+from datetime import datetime
+from typing import Dict, List, Tuple, Optional
+
 import numpy as np
-from collections import Counter, defaultdict
-from typing import List, Dict, Tuple, Any, Set
-from io import BytesIO
-from datetime import date, datetime
-from groq import Groq
-
-# ============================================================
-# 🎯 CONSULTING-GRADE BRAND INTELLIGENCE PLATFORM
-# Professional UI · Complete Analytics · Strategic Insights
-# ============================================================
-
-# Optional dependencies
-try:
-    import plotly.express as px
-    import plotly.graph_objects as go
-    from plotly.subplots import make_subplots
-    PLOTLY_AVAILABLE = True
-except ImportError:
-    PLOTLY_AVAILABLE = False
-    st.error("⚠️ Plotly未安装。请运行: pip install plotly")
-
-try:
-    from wordcloud import WordCloud
-    import matplotlib.pyplot as plt
-    import matplotlib
-    matplotlib.use('Agg')
-    WORDCLOUD_AVAILABLE = True
-except ImportError:
-    WORDCLOUD_AVAILABLE = False
+import pandas as pd
+import streamlit as st
+import plotly.express as px
+import plotly.graph_objects as go
 
 try:
     import jieba
-    import jieba.analyse
-    JIEBA_AVAILABLE = True
-except ImportError:
-    JIEBA_AVAILABLE = False
+except Exception:
+    jieba = None
 
-# ============================================================
-# 🔐 SECURE API KEY MANAGEMENT
-# ============================================================
+# Optional Groq (for better sentiment/summary if user wants)
+try:
+    from groq import Groq
+except Exception:
+    Groq = None
 
-def get_groq_api_key() -> str:
-    """Secure API key retrieval"""
-    try:
-        api_key = st.secrets.get("GROQ_API_KEY", "").strip()
-        if api_key:
-            return api_key
-    except Exception:
-        pass
-    
-    api_key = os.getenv("GROQ_API_KEY", "").strip()
-    if api_key:
-        return api_key
-    
-    return ""
 
-def initialize_groq_client():
-    """Initialize Groq client with secure key management"""
-    api_key = get_groq_api_key()
-    
-    if not api_key:
-        st.sidebar.warning("⚠️ GROQ API KEY 未配置")
-        st.sidebar.markdown("""
-        **配置方法:**
-        
-        **方法1: Streamlit Secrets**
-        ```bash
-        mkdir -p ~/.streamlit
-        echo 'GROQ_API_KEY = "your-key"' > ~/.streamlit/secrets.toml
-        ```
-        
-        **方法2: 环境变量**
-        ```bash
-        export GROQ_API_KEY="your-key"
-        ```
-        """)
-        
-        temp_key = st.sidebar.text_input("临时输入 API Key", type="password", key="temp_api_key")
-        if temp_key:
-            api_key = temp_key
-        else:
-            return None
-    
-    try:
-        client = Groq(api_key=api_key, timeout=30.0, max_retries=3)
-        return client
-    except Exception as e:
-        st.sidebar.error(f"❌ API初始化失败: {str(e)}")
-        return None
+# =========================
+# UI: Apple-like minimal style (no emoji)
+# =========================
+def apply_minimal_ui():
+    st.set_page_config(
+        page_title="Aurora Campaign Risk OS",
+        page_icon="",
+        layout="wide",
+        initial_sidebar_state="expanded",
+    )
 
-client = initialize_groq_client()
-
-# ============================================================
-# 📊 ENHANCED CONFIGURATION
-# ============================================================
-
-# Comprehensive stopwords (200+ words)
-CHINESE_STOPWORDS = {
-    # 通用停用词
-    "的", "了", "是", "在", "我", "有", "和", "就", "不", "人", "都", "一", "个",
-    "上", "也", "很", "到", "说", "要", "去", "你", "会", "着", "没有", "看", "好",
-    "自己", "这", "那", "里", "来", "为", "但", "而", "与", "或", "啊", "呀", "吗",
-    "呢", "吧", "哦", "哈", "嗯", "唉", "哎", "啦", "么", "嘛", "呗", "得", "吧",
-    
-    # 无意义高频词
-    "真的", "感觉", "觉得", "还是", "然后", "所以", "因为", "如果", "这个", "那个",
-    "什么", "怎么", "非常", "比较", "可能", "应该", "肯定", "一定", "绝对", "真是",
-    "确实", "简直", "完全", "十分", "特别", "尤其", "总之", "反正", "其实", "本来",
-    "已经", "还有", "而且", "不过", "只是", "可是", "但是", "虽然", "尽管", "还好",
-    
-    # 品牌相关（动态添加）
-    "品牌", "牌子", "产品", "东西", "这款", "那款", "这个牌子", "那个牌子",
-    "这家", "那家", "商家", "店家",
-    
-    # 电商/社交平台
-    "旗舰店", "官方", "店铺", "卖家", "买家", "客服", "购买", "下单", "收货",
-    "小红书", "笔记", "种草", "拔草", "安利", "分享", "推荐", "测评", "开箱",
-    
-    # 代词和连词
-    "他", "她", "它", "们", "我们", "你们", "他们", "她们", "咱们",
-}
-
-ENGLISH_STOPWORDS = {
-    "the", "is", "are", "was", "were", "be", "been", "being", "a", "an", "and",
-    "or", "but", "in", "on", "at", "to", "for", "of", "with", "by", "from", "as",
-    "it", "this", "that", "these", "those", "i", "you", "he", "she", "we", "they"
-}
-
-# Enhanced sentiment terms
-POSITIVE_TERMS = [
-    # 产品体验
-    "好", "棒", "喜欢", "爱", "推荐", "值得", "满意", "完美", "赞", "优秀", "不错",
-    "好用", "实用", "舒服", "温和", "柔滑", "显白", "持久", "滋润", "保湿", "清爽",
-    "轻薄", "服帖", "自然", "显色", "正", "顺滑", "细腻", "丝滑", "水润", "嫩",
-    
-    # 价值
-    "划算", "超值", "惊喜", "物超所值", "性价比高", "实惠", "便宜", "优惠",
-    
-    # 外观
-    "高级", "精致", "漂亮", "美", "好看", "颜值高", "大气", "时尚", "奢华",
-    
-    # 英文
-    "good", "great", "love", "excellent", "perfect", "amazing", "best", "recommend"
-]
-
-NEGATIVE_TERMS = [
-    # 产品问题
-    "差", "不好", "失望", "后悔", "避雷", "翻车", "坑", "垃圾", "难用", "鸡肋",
-    "拔干", "卡纹", "掉色", "氧化", "暗沉", "显黑", "厚重", "油腻", "粘", "假白",
-    "不持久", "易掉", "易花", "斑驳", "不均匀", "结块", "起皮", "过敏", "刺激",
-    
-    # 价格
-    "不值", "贵", "太贵", "溢价", "不划算", "性价比低", "坑钱", "智商税",
-    
-    # 真伪
-    "假", "假货", "骗", "欺诈", "仿冒", "不是正品", "有问题", "怀疑",
-    
-    # 服务
-    "退", "退货", "退款", "投诉", "维权", "拒退", "态度差", "慢", "破损",
-    
-    # 英文
-    "bad", "worst", "terrible", "horrible", "awful", "poor", "fake", "scam"
-]
-
-# Professional category framework
-CATEGORY_FRAMEWORK = {
-    "🎨 产品体验": {
-        "keywords": [
-            "质地", "显色", "持妆", "持久", "掉色", "拔干", "干", "润", "保湿", "滋润",
-            "卡纹", "唇纹", "顺滑", "轻薄", "厚重", "氧化", "显气色", "显白", "显黑",
-            "服帖", "自然", "细腻", "丝滑", "水润", "清爽", "油腻", "粘", "假白",
-            "妆感", "上妆", "晕染", "浮粉", "卡粉", "脱妆", "过敏", "刺激", "闷痘"
-        ]
-    },
-    "💰 性价比": {
-        "keywords": [
-            "价格", "性价比", "值不值", "值", "不值", "贵", "便宜", "溢价", "划算",
-            "不划算", "活动", "折扣", "优惠", "实惠", "超值", "物超所值", "坑钱", "智商税"
-        ]
-    },
-    "📦 包装设计": {
-        "keywords": [
-            "包装", "质感", "高级", "颜值", "好看", "外观", "设计", "精致", "大气",
-            "时尚", "奢华", "档次", "简约", "复古", "可爱", "包装盒", "瓶子"
-        ]
-    },
-    "🚚 物流配送": {
-        "keywords": [
-            "物流", "发货", "到货", "快递", "配送", "快", "慢", "及时", "延迟",
-            "破损", "漏液", "丢件", "少件", "缺货"
-        ]
-    },
-    "🛡️ 售后服务": {
-        "keywords": [
-            "售后", "客服", "退货", "退款", "拒退", "换货", "补偿", "处理", "投诉",
-            "态度", "热情", "耐心", "专业", "回复", "解决"
-        ]
-    },
-    "⚠️ 真伪问题": {
-        "keywords": [
-            "假货", "真假", "正品", "欺诈", "维权", "举报", "骗", "仿冒", "盗版",
-            "三无", "假冒", "验证", "防伪", "授权", "官方"
-        ]
-    },
-    "🔄 竞品对比": {
-        "keywords": [
-            "不如", "比起", "相比", "对比", "更好", "更差", "差不多", "类似",
-            "平替", "替代", "同价位", "同档次", "竞品", "其他品牌"
-        ]
-    }
-}
-
-# ============================================================
-# 🎨 CISION-STYLE PROFESSIONAL UI
-# ============================================================
-
-def apply_cision_ui():
-    """Apply Cision-inspired professional consulting UI"""
-    st.markdown("""
+    css = """
     <style>
-        /* Import professional fonts */
-        @import url('https://fonts.googleapis.com/css2?family=Source+Sans+Pro:wght@300;400;600;700&family=Inter:wght@400;500;600;700&display=swap');
-        
-        /* Global reset */
-        * {
-            font-family: 'Source Sans Pro', 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
-        }
-        
-        /* Main container */
-        .main {
-            background: #f8f9fa;
-            padding: 0;
-        }
-        
-        .block-container {
-            padding: 2rem 3rem;
-            max-width: 1400px;
-        }
-        
-        /* Header */
-        .main-header {
-            font-size: 2.5rem;
-            font-weight: 700;
-            color: #1a1a1a;
-            margin-bottom: 0.5rem;
-            letter-spacing: -0.5px;
-        }
-        
-        .sub-header {
-            font-size: 1rem;
-            color: #6c757d;
-            font-weight: 400;
-            margin-bottom: 2rem;
-            letter-spacing: 0.3px;
-        }
-        
-        /* Cards - Cision style */
-        .metric-card {
-            background: white;
-            border-radius: 8px;
-            padding: 1.5rem;
-            box-shadow: 0 1px 3px rgba(0,0,0,0.08);
-            border: 1px solid #e9ecef;
-            margin-bottom: 1rem;
-            transition: all 0.2s ease;
-        }
-        
-        .metric-card:hover {
-            box-shadow: 0 4px 8px rgba(0,0,0,0.12);
-        }
-        
-        .metric-value {
-            font-size: 2.5rem;
-            font-weight: 700;
-            color: #2c3e50;
-            line-height: 1;
-            margin: 0.5rem 0;
-        }
-        
-        .metric-label {
-            font-size: 0.875rem;
-            color: #6c757d;
-            text-transform: uppercase;
-            letter-spacing: 0.5px;
-            font-weight: 600;
-        }
-        
-        .metric-delta {
-            font-size: 0.875rem;
-            margin-top: 0.5rem;
-            font-weight: 500;
-        }
-        
-        /* Section headers */
-        .section-header {
-            font-size: 1.5rem;
-            font-weight: 600;
-            color: #1a1a1a;
-            margin: 2rem 0 1rem 0;
-            padding-bottom: 0.5rem;
-            border-bottom: 2px solid #e9ecef;
-        }
-        
-        /* Info boxes */
-        .info-box {
-            background: #f8f9fa;
-            border-left: 4px solid #007bff;
-            border-radius: 4px;
-            padding: 1rem 1.2rem;
-            margin: 1rem 0;
-            font-size: 0.9rem;
-            line-height: 1.6;
-        }
-        
-        .info-box-title {
-            font-weight: 600;
-            color: #007bff;
-            margin-bottom: 0.5rem;
-        }
-        
-        /* Tabs - Cision style */
-        .stTabs [data-baseweb="tab-list"] {
-            gap: 0;
-            background-color: white;
-            padding: 0;
-            border-radius: 8px 8px 0 0;
-            border-bottom: 2px solid #e9ecef;
-            box-shadow: 0 1px 3px rgba(0,0,0,0.08);
-        }
-        
-        .stTabs [data-baseweb="tab"] {
-            height: 3.5rem;
-            font-size: 0.9rem;
-            font-weight: 600;
-            border-radius: 0;
-            padding: 0 2rem;
-            color: #6c757d;
-            border-bottom: 3px solid transparent;
-            transition: all 0.2s ease;
-        }
-        
-        .stTabs [data-baseweb="tab"]:hover {
-            background-color: #f8f9fa;
-            color: #1a1a1a;
-        }
-        
-        .stTabs [aria-selected="true"] {
-            background-color: white;
-            color: #007bff;
-            border-bottom: 3px solid #007bff;
-        }
-        
-        /* Buttons */
-        .stButton > button {
-            background: #007bff;
-            color: white;
-            border: none;
-            border-radius: 6px;
-            padding: 0.6rem 1.5rem;
-            font-weight: 600;
-            font-size: 0.9rem;
-            letter-spacing: 0.3px;
-            transition: all 0.2s ease;
-        }
-        
-        .stButton > button:hover {
-            background: #0056b3;
-            box-shadow: 0 4px 8px rgba(0,123,255,0.3);
-        }
-        
-        /* DataFrames */
-        .dataframe {
-            font-size: 0.875rem;
-            border-radius: 8px;
-            overflow: hidden;
-            border: 1px solid #e9ecef;
-        }
-        
-        .dataframe thead th {
-            background-color: #f8f9fa;
-            color: #1a1a1a;
-            font-weight: 600;
-            text-transform: uppercase;
-            font-size: 0.75rem;
-            letter-spacing: 0.5px;
-            padding: 1rem 0.75rem;
-        }
-        
-        .dataframe tbody td {
-            padding: 0.75rem;
-            border-bottom: 1px solid #f1f3f5;
-        }
-        
-        /* Sidebar */
-        .css-1d391kg, [data-testid="stSidebar"] {
-            background: white;
-            border-right: 1px solid #e9ecef;
-        }
-        
-        [data-testid="stSidebar"] .element-container {
-            padding: 0.5rem 0;
-        }
-        
-        /* Metrics grid */
-        .metrics-row {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-            gap: 1rem;
-            margin: 1rem 0;
-        }
-        
-        /* Priority badges */
-        .badge {
-            display: inline-block;
-            padding: 0.25rem 0.75rem;
-            border-radius: 4px;
-            font-size: 0.75rem;
-            font-weight: 600;
-            letter-spacing: 0.3px;
-            text-transform: uppercase;
-        }
-        
-        .badge-high {
-            background: #fee;
-            color: #c00;
-        }
-        
-        .badge-medium {
-            background: #ffeaa7;
-            color: #d63031;
-        }
-        
-        .badge-low {
-            background: #dfe6e9;
-            color: #636e72;
-        }
-        
-        /* Chart containers */
-        .chart-container {
-            background: white;
-            border-radius: 8px;
-            padding: 1.5rem;
-            box-shadow: 0 1px 3px rgba(0,0,0,0.08);
-            border: 1px solid #e9ecef;
-            margin: 1rem 0;
-        }
-        
-        .chart-title {
-            font-size: 1.1rem;
-            font-weight: 600;
-            color: #1a1a1a;
-            margin-bottom: 1rem;
-        }
-        
-        /* Remove default streamlit branding */
-        #MainMenu {visibility: hidden;}
-        footer {visibility: hidden;}
-        
-        /* Responsive */
-        @media (max-width: 768px) {
-            .block-container {
-                padding: 1rem;
-            }
-            
-            .metric-value {
-                font-size: 2rem;
-            }
-        }
+      :root{
+        --bg:#FFFFFF;
+        --soft:#F5F5F7;
+        --text:#111111;
+        --muted:#6B7280;
+        --border:#D1D1D6;
+        --accent:#0A84FF;
+      }
+
+      .stApp { background: var(--bg); color: var(--text); }
+      section[data-testid="stSidebar"] { background: var(--soft); border-right: 1px solid var(--border); }
+      div[data-testid="stVerticalBlockBorderWrapper"]{ border: 1px solid var(--border); border-radius: 12px; padding: 14px; background: #fff; }
+      .card { border: 1px solid var(--border); border-radius: 12px; padding: 14px; background: #fff; }
+      .kpi-title { font-size: 12px; color: var(--muted); letter-spacing: .02em; text-transform: uppercase; }
+      .kpi-value { font-size: 30px; font-weight: 700; line-height: 1.1; color: var(--text); }
+      .kpi-sub { font-size: 12px; color: var(--muted); margin-top: 6px; }
+      .badge { display:inline-block; padding: 4px 10px; border-radius: 999px; border: 1px solid var(--border); font-size: 12px; }
+      .badge.low{ background:#F5F5F7; color:#111; }
+      .badge.med{ background:#EEF2FF; color:#1E3A8A; border-color:#C7D2FE; }
+      .badge.high{ background:#FFF7ED; color:#9A3412; border-color:#FED7AA; }
+      .badge.critical{ background:#FEF2F2; color:#991B1B; border-color:#FECACA; }
+      hr { border: none; border-top: 1px solid var(--border); margin: 10px 0 12px 0; }
+      .small-note { color: var(--muted); font-size: 12px; }
+      .section-title { font-size: 16px; font-weight: 700; margin: 4px 0 6px 0; }
+      .subtle { color: var(--muted); font-size: 13px; }
     </style>
-    """, unsafe_allow_html=True)
+    """
+    st.markdown(css, unsafe_allow_html=True)
 
-# ============================================================
-# 🔍 ADVANCED KEYWORD EXTRACTION (FIXED)
-# ============================================================
 
-def build_dynamic_stopwords(brand_names: List[str]) -> Set[str]:
-    """Build comprehensive stopwords including brand names"""
-    stopwords = CHINESE_STOPWORDS.copy()
-    stopwords.update(ENGLISH_STOPWORDS)
-    
-    # Add brand names and variations
-    for brand in brand_names:
-        if brand:
-            brand_lower = brand.lower().strip()
-            stopwords.add(brand_lower)
-            stopwords.add(brand.upper())
-            stopwords.add(brand.title())
-            # Add variations
-            stopwords.add(f"{brand_lower}家")
-            stopwords.add(f"{brand_lower}的")
-            stopwords.add(f"{brand_lower}牌")
-    
-    return stopwords
+# =========================
+# Constants & helpers
+# =========================
+TEXT_COL_CANDIDATES = ["comment_text", "content", "text", "评论", "评论正文", "comment", "内容"]
+DATE_COL_CANDIDATES = ["created_at", "create_time", "time", "date", "发布时间", "时间", "日期"]
+SENTIMENT_COL_CANDIDATES = ["sentiment_label", "sentiment", "情感", "情绪", "label"]
+KOL_COL_CANDIDATES = ["kol_name", "kol", "达人", "博主", "KOL", "红人"]
+BRAND_COL_CANDIDATES = ["brand", "品牌"]
+CAMPAIGN_COL_CANDIDATES = ["campaign", "活动", "campaign_name"]
+PLATFORM_COL_CANDIDATES = ["platform", "平台"]
+POST_COL_CANDIDATES = ["post_id", "note_id", "作品id", "笔记id", "post"]
 
-def extract_keywords_fixed(text: str, stopwords: Set[str]) -> List[str]:
-    """FIXED: Extract keywords accurately from text"""
-    text = str(text).strip().lower()
-    
-    if not text:
-        return []
-    
-    keywords = []
-    
-    if JIEBA_AVAILABLE:
-        # Use jieba for accurate Chinese segmentation
-        words = jieba.cut(text, cut_all=False)
-        
-        for word in words:
-            word = word.strip()
-            
-            # Filter conditions
-            if len(word) < 2:  # Too short
-                continue
-            if word in stopwords:  # Stopword
-                continue
-            if re.match(r'^\d+$', word):  # Pure numbers
-                continue
-            if re.match(r'^[a-z]$', word):  # Single letter
-                continue
-            
-            keywords.append(word)
-    else:
-        # Fallback: regex-based extraction
-        chinese_words = re.findall(r'[\u4e00-\u9fff]{2,6}', text)
-        english_words = re.findall(r'[a-z]{3,20}', text)
-        
-        all_words = chinese_words + english_words
-        
-        for word in all_words:
-            word = word.strip()
-            if word and word not in stopwords and len(word) >= 2:
-                keywords.append(word)
-    
-    return keywords
+DEFAULT_RISK_TERMS = [
+    # product safety / allergy
+    "过敏", "刺痛", "红肿", "发炎", "起皮", "干裂", "爆皮", "灼烧", "痒", "不适", "敏感肌",
+    # quality / authenticity
+    "批次", "质量", "不稳定", "假货", "仿", "漏油", "断裂", "变质",
+    # dissatisfaction / service
+    "投诉", "退货", "维权", "失望", "踩雷", "翻车", "避雷", "不值", "太贵", "智商税",
+    # brand response
+    "不回应", "没回应", "未回应", "官方回应", "道歉",
+]
 
-def categorize_keyword(keyword: str) -> Tuple[str, str]:
-    """Categorize keyword into business dimensions"""
-    kw_lower = keyword.lower()
-    
-    for category, info in CATEGORY_FRAMEWORK.items():
-        for term in info["keywords"]:
-            if term.lower() in kw_lower or kw_lower in term.lower():
-                return category, ""
-    
-    return "📌 其他", ""
+POSITIVE_HINTS = ["好看", "显白", "高级", "喜欢", "值得", "温柔", "好用", "回购", "推荐", "惊艳", "好闻", "舒服", "顺滑"]
+NEGATIVE_HINTS = ["过敏", "刺痛", "干裂", "起皮", "爆皮", "翻车", "避雷", "失望", "不值", "太贵", "智商税", "难用", "拔干", "掉色", "沾杯"]
 
-def extract_top_keywords_enhanced(
-    posts: List[str],
-    brand_names: List[str],
-    min_frequency: int = 2,
-    top_n: int = 30
-) -> List[Dict[str, Any]]:
-    """ENHANCED: Extract top keywords with accurate frequency counting"""
-    
-    if not posts:
-        return []
-    
-    stopwords = build_dynamic_stopwords(brand_names)
-    
-    # Extract keywords from all posts
-    keyword_posts_map = defaultdict(set)
-    
-    for idx, post in enumerate(posts):
-        keywords = extract_keywords_fixed(post, stopwords)
-        # Use set to count each keyword only once per post
-        for kw in set(keywords):
-            keyword_posts_map[kw].add(idx)
-    
-    # Count post-level frequency
-    keyword_counts = {kw: len(post_ids) for kw, post_ids in keyword_posts_map.items()}
-    
-    # Filter by minimum frequency
-    keyword_counts = {k: v for k, v in keyword_counts.items() if v >= min_frequency}
-    
-    # Rank keywords by frequency
-    ranked = sorted(keyword_counts.items(), key=lambda x: -x[1])[:top_n]
-    
-    results = []
-    for keyword, count in ranked:
-        category, _ = categorize_keyword(keyword)
-        
-        # Get posts containing this keyword
-        keyword_posts = [posts[idx] for idx in keyword_posts_map[keyword]]
-        sentiment = calculate_sentiment_distribution(keyword_posts)
-        
-        # Determine priority
-        if count >= 10:
-            priority = "High"
-            status = "🔴 High Priority"
-        elif count >= 5:
-            priority = "Medium"
-            status = "🟠 Medium Priority"
-        else:
-            priority = "Low"
-            status = "🟢 Low Priority"
-        
-        results.append({
-            "keyword": keyword,
-            "mentions": count,
-            "category": category,
-            "priority": priority,
-            "status": status,
-            "sentiment_score": sentiment["net_sentiment"],
-            "positive_ratio": sentiment["positive_pct"],
-            "negative_ratio": sentiment["negative_pct"],
-        })
-    
-    return results
 
-# ============================================================
-# 😊 SENTIMENT ANALYSIS
-# ============================================================
+def normalize_colname(s: str) -> str:
+    return re.sub(r"\s+", "_", str(s).strip().lower())
 
-def analyze_sentiment(text: str) -> str:
-    """Analyze sentiment of single text"""
-    text_lower = text.lower()
-    
-    pos_count = sum(1 for term in POSITIVE_TERMS if term in text_lower)
-    neg_count = sum(1 for term in NEGATIVE_TERMS if term in text_lower)
-    
-    # Check for negation
-    negation_patterns = ["不太", "并不", "不是很", "没那么", "not really", "not very"]
-    has_negation = any(pattern in text_lower for pattern in negation_patterns)
-    
-    if has_negation:
-        return "Neutral"
-    
-    if pos_count > neg_count and pos_count >= 1:
-        return "Positive"
-    elif neg_count > pos_count and neg_count >= 1:
-        return "Negative"
-    else:
-        return "Neutral"
 
-def calculate_sentiment_distribution(posts: List[str]) -> Dict[str, Any]:
-    """Calculate sentiment distribution metrics"""
-    if not posts:
-        return {
-            "positive": 0, "negative": 0, "neutral": 0, "total": 0,
-            "positive_pct": 0, "negative_pct": 0, "neutral_pct": 0,
-            "net_sentiment": 0, "confidence": "Insufficient data"
-        }
-    
-    sentiments = [analyze_sentiment(post) for post in posts]
-    counter = Counter(sentiments)
-    total = len(sentiments)
-    
-    pos = counter.get("Positive", 0)
-    neg = counter.get("Negative", 0)
-    neu = counter.get("Neutral", 0)
-    
-    net_sentiment = (pos - neg) / total if total > 0 else 0
-    
-    # Confidence based on sample size
-    if total < 10:
-        confidence = "Low (n<10)"
-    elif total < 30:
-        confidence = "Medium (n<30)"
-    else:
-        confidence = "High (n≥30)"
-    
-    return {
-        "positive": pos,
-        "negative": neg,
-        "neutral": neu,
-        "total": total,
-        "positive_pct": pos / total if total > 0 else 0,
-        "negative_pct": neg / total if total > 0 else 0,
-        "neutral_pct": neu / total if total > 0 else 0,
-        "net_sentiment": net_sentiment,
-        "confidence": confidence
+def is_string_like_series(s: pd.Series) -> bool:
+    # object dtype is typical for text
+    if s.dtype == "object":
+        return True
+    # pandas string dtype
+    if str(s.dtype).startswith("string"):
+        return True
+    return False
+
+
+def safe_to_str(x) -> str:
+    if pd.isna(x):
+        return ""
+    return str(x)
+
+
+def clamp(v: float, lo: float, hi: float) -> float:
+    return max(lo, min(hi, v))
+
+
+# =========================
+# Column mapping & validation
+# =========================
+def auto_match_column(df: pd.DataFrame, candidates: List[str]) -> Optional[str]:
+    cols = list(df.columns)
+    norm_map = {normalize_colname(c): c for c in cols}
+    for cand in candidates:
+        key = normalize_colname(cand)
+        if key in norm_map:
+            return norm_map[key]
+    # fuzzy: contains
+    for c in cols:
+        cn = normalize_colname(c)
+        for cand in candidates:
+            if normalize_colname(cand) in cn:
+                return c
+    return None
+
+
+def suggest_text_columns(df: pd.DataFrame) -> List[str]:
+    cols = []
+    for c in df.columns:
+        if is_string_like_series(df[c]):
+            cols.append(c)
+    return cols
+
+
+def validate_dataframe(df: pd.DataFrame) -> Dict[str, object]:
+    report = {}
+    report["rows"] = int(len(df))
+    report["cols"] = int(len(df.columns))
+    report["empty_rows"] = int(df.isna().all(axis=1).sum())
+    report["duplicates"] = int(df.duplicated().sum())
+    report["nulls_total"] = int(df.isna().sum().sum())
+    return report
+
+
+def map_required_columns(df: pd.DataFrame) -> Dict[str, Optional[str]]:
+    mapping = {
+        "platform": auto_match_column(df, PLATFORM_COL_CANDIDATES),
+        "campaign": auto_match_column(df, CAMPAIGN_COL_CANDIDATES),
+        "brand": auto_match_column(df, BRAND_COL_CANDIDATES),
+        "kol_name": auto_match_column(df, KOL_COL_CANDIDATES),
+        "post_id": auto_match_column(df, POST_COL_CANDIDATES),
+        "comment_text": auto_match_column(df, TEXT_COL_CANDIDATES),
+        "created_at": auto_match_column(df, DATE_COL_CANDIDATES),
+        "sentiment_label": auto_match_column(df, SENTIMENT_COL_CANDIDATES),
     }
+    return mapping
 
-# ============================================================
-# 📊 WORD CLOUD GENERATION (FIXED)
-# ============================================================
 
-def create_word_cloud_fixed(
-    posts: List[str],
-    brand_names: List[str],
-    title: str = "关键词词云"
-):
-    """FIXED: Create accurate word cloud from posts"""
-    if not WORDCLOUD_AVAILABLE or not posts:
+def enforce_text_column(df: pd.DataFrame, text_col: str) -> pd.Series:
+    s = df[text_col]
+    if not is_string_like_series(s):
+        raise ValueError("Selected text column is not a text/string column.")
+    # Convert to string and strip
+    return s.astype(str).fillna("").map(lambda x: x.strip())
+
+
+def parse_datetime_series(df: pd.DataFrame, col: Optional[str]) -> Optional[pd.Series]:
+    if col is None or col not in df.columns:
         return None
-    
-    # Build stopwords
-    stopwords = build_dynamic_stopwords(brand_names)
-    
-    # Extract all keywords
-    all_keywords = []
-    for post in posts:
-        keywords = extract_keywords_fixed(post, stopwords)
-        all_keywords.extend(keywords)
-    
-    if not all_keywords:
-        return None
-    
-    # Count frequency
-    keyword_freq = Counter(all_keywords)
-    
-    # Generate word cloud
     try:
-        # Try to find Chinese font
-        font_paths = [
-            "/System/Library/Fonts/STHeiti Medium.ttc",  # macOS
-            "/System/Library/Fonts/PingFang.ttc",  # macOS
-            "C:\\Windows\\Fonts\\msyh.ttc",  # Windows
-            "C:\\Windows\\Fonts\\simhei.ttf",  # Windows
-            "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",  # Linux
-            "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",  # Linux
-        ]
-        
-        font_path = None
-        for path in font_paths:
-            if os.path.exists(path):
-                font_path = path
-                break
-        
-        wc = WordCloud(
-            width=1200,
-            height=600,
-            background_color='white',
-            font_path=font_path,
-            max_words=100,
-            relative_scaling=0.5,
-            colormap='Blues',  # Professional color scheme
-            prefer_horizontal=0.7,
-            min_font_size=12,
-            max_font_size=120,
-            collocations=False  # Prevent duplicate phrases
-        ).generate_from_frequencies(keyword_freq)
-        
-        # Create figure
-        fig, ax = plt.subplots(figsize=(14, 7), facecolor='white')
-        ax.imshow(wc, interpolation='bilinear')
-        ax.axis('off')
-        ax.set_title(title, fontsize=18, pad=20, weight='bold', color='#1a1a1a')
-        
-        plt.tight_layout(pad=1)
-        
-        return fig
-        
-    except Exception as e:
-        st.warning(f"词云生成失败: {str(e)}")
+        s = pd.to_datetime(df[col], errors="coerce", utc=False)
+        return s
+    except Exception:
         return None
 
-# ============================================================
-# 📈 PROFESSIONAL VISUALIZATIONS
-# ============================================================
 
-def create_sentiment_gauge(sentiment_data: Dict, brand_name: str):
-    """Professional sentiment gauge chart"""
-    if not PLOTLY_AVAILABLE:
+# =========================
+# Sentiment engine
+# =========================
+def standardize_sentiment_label(x: str) -> Optional[str]:
+    if x is None:
         return None
-    
-    net_sentiment = sentiment_data.get("net_sentiment", 0)
-    gauge_value = (net_sentiment + 1) * 50  # Map -1~1 to 0~100
-    
-    # Color based on sentiment
-    if net_sentiment > 0.3:
-        color = "#27ae60"
-    elif net_sentiment > 0:
-        color = "#f39c12"
-    elif net_sentiment > -0.3:
-        color = "#e74c3c"
-    else:
-        color = "#c0392b"
-    
-    fig = go.Figure(go.Indicator(
-        mode = "gauge+number+delta",
-        value = gauge_value,
-        domain = {'x': [0, 1], 'y': [0, 1]},
-        title = {
-            'text': f"<b>{brand_name}</b><br><span style='font-size:0.9em;color:#6c757d'>Net Sentiment Index</span>",
-            'font': {'size': 18, 'family': 'Source Sans Pro'}
-        },
-        delta = {'reference': 50, 'increasing': {'color': "#27ae60"}},
-        number = {'font': {'size': 40, 'family': 'Source Sans Pro'}},
-        gauge = {
-            'axis': {'range': [None, 100], 'tickwidth': 1, 'tickcolor': "#e9ecef"},
-            'bar': {'color': color, 'thickness': 0.25},
-            'bgcolor': "white",
-            'borderwidth': 2,
-            'bordercolor': "#e9ecef",
-            'steps': [
-                {'range': [0, 25], 'color': '#ffebee'},
-                {'range': [25, 40], 'color': '#fff3e0'},
-                {'range': [40, 60], 'color': '#f1f8e9'},
-                {'range': [60, 75], 'color': '#e8f5e9'},
-                {'range': [75, 100], 'color': '#c8e6c9'}
-            ],
-            'threshold': {
-                'line': {'color': "#6c757d", 'width': 3},
-                'thickness': 0.75,
-                'value': 50
-            }
-        }
-    ))
-    
-    fig.update_layout(
-        height=350,
-        font={'family': "Source Sans Pro"},
-        paper_bgcolor="rgba(0,0,0,0)",
-        margin=dict(l=30, r=30, t=80, b=30)
-    )
-    
-    return fig
+    s = str(x).strip().lower()
+    # common variants
+    if s in ["positive", "pos", "p", "正面", "正向", "好评", "好"]:
+        return "positive"
+    if s in ["neutral", "neu", "n", "中性", "一般", "还行"]:
+        return "neutral"
+    if s in ["negative", "neg", "bad", "负面", "负向", "差评", "差"]:
+        return "negative"
+    return None
 
-def create_keyword_frequency_chart(keyword_data: List[Dict], top_n: int = 15):
-    """Professional horizontal bar chart for keyword frequency"""
-    if not PLOTLY_AVAILABLE or not keyword_data:
-        return None
-    
-    df = pd.DataFrame(keyword_data).head(top_n)
-    df = df.sort_values('mentions', ascending=True)
-    
-    # Color by priority
-    colors = []
-    for priority in df['priority']:
-        if priority == 'High':
-            colors.append('#e74c3c')
-        elif priority == 'Medium':
-            colors.append('#f39c12')
-        else:
-            colors.append('#3498db')
-    
-    fig = go.Figure(go.Bar(
-        x=df['mentions'],
-        y=df['keyword'],
-        orientation='h',
-        marker=dict(
-            color=colors,
-            line=dict(color='white', width=1)
-        ),
-        text=df['mentions'],
-        textposition='outside',
-        textfont=dict(size=11, family='Source Sans Pro', color='#1a1a1a'),
-        hovertemplate='<b>%{y}</b><br>Mentions: %{x}<br>Category: %{customdata}<extra></extra>',
-        customdata=df['category']
-    ))
-    
-    fig.update_layout(
-        title=dict(
-            text="<b>Top Keywords by Mention Frequency</b>",
-            font=dict(size=16, family='Source Sans Pro', color='#1a1a1a'),
-            x=0,
-            xanchor='left'
-        ),
-        xaxis=dict(
-            title="Number of Mentions",
-            showgrid=True,
-            gridcolor='#f1f3f5',
-            zeroline=False
-        ),
-        yaxis=dict(
-            title="",
-            showgrid=False
-        ),
-        height=max(400, len(df) * 30),
-        margin=dict(l=150, r=50, t=60, b=50),
-        paper_bgcolor='rgba(0,0,0,0)',
-        plot_bgcolor='white',
-        font=dict(family='Source Sans Pro', size=12)
-    )
-    
-    return fig
 
-def create_sentiment_breakdown_chart(sentiment_data: Dict):
-    """Professional donut chart for sentiment breakdown"""
-    if not PLOTLY_AVAILABLE:
-        return None
-    
-    labels = ['Positive', 'Neutral', 'Negative']
-    values = [
-        sentiment_data['positive'],
-        sentiment_data['neutral'],
-        sentiment_data['negative']
-    ]
-    colors = ['#27ae60', '#95a5a6', '#e74c3c']
-    
-    fig = go.Figure(data=[go.Pie(
-        labels=labels,
-        values=values,
-        hole=0.5,
-        marker=dict(colors=colors, line=dict(color='white', width=2)),
-        textposition='outside',
-        textinfo='label+percent',
-        textfont=dict(size=13, family='Source Sans Pro'),
-        hovertemplate='<b>%{label}</b><br>Count: %{value}<br>Percentage: %{percent}<extra></extra>'
-    )])
-    
-    fig.update_layout(
-        title=dict(
-            text="<b>Sentiment Distribution</b>",
-            font=dict(size=16, family='Source Sans Pro', color='#1a1a1a'),
-            x=0.5,
-            xanchor='center'
-        ),
-        height=400,
-        showlegend=True,
-        legend=dict(
-            orientation="h",
-            yanchor="bottom",
-            y=-0.15,
-            xanchor="center",
-            x=0.5,
-            font=dict(size=12, family='Source Sans Pro')
-        ),
-        paper_bgcolor='rgba(0,0,0,0)',
-        font=dict(family='Source Sans Pro'),
-        margin=dict(l=50, r=50, t=60, b=50)
-    )
-    
-    return fig
+def rule_based_sentiment(text: str) -> str:
+    t = safe_to_str(text)
+    if not t:
+        return "neutral"
+    neg_hits = sum(1 for w in NEGATIVE_HINTS if w in t)
+    pos_hits = sum(1 for w in POSITIVE_HINTS if w in t)
+    if neg_hits > pos_hits and neg_hits > 0:
+        return "negative"
+    if pos_hits > neg_hits and pos_hits > 0:
+        return "positive"
+    return "neutral"
 
-def create_category_distribution(keyword_data: List[Dict]):
-    """Professional sunburst chart for category distribution"""
-    if not PLOTLY_AVAILABLE or not keyword_data:
-        return None
-    
-    # Aggregate by category
-    category_counts = defaultdict(int)
-    category_keywords = defaultdict(list)
-    
-    for item in keyword_data:
-        cat = item['category']
-        category_counts[cat] += item['mentions']
-        category_keywords[cat].append({
-            'keyword': item['keyword'],
-            'mentions': item['mentions']
-        })
-    
-    # Build hierarchical data
-    labels = ["Brand Discussion"]
-    parents = [""]
-    values = [0]
-    colors = []
-    
-    color_map = {
-        "🎨 产品体验": "#3498db",
-        "💰 性价比": "#2ecc71",
-        "📦 包装设计": "#9b59b6",
-        "🚚 物流配送": "#f39c12",
-        "🛡️ 售后服务": "#e74c3c",
-        "⚠️ 真伪问题": "#c0392b",
-        "🔄 竞品对比": "#34495e",
-        "📌 其他": "#95a5a6"
-    }
-    
-    for cat, count in sorted(category_counts.items(), key=lambda x: -x[1]):
-        labels.append(cat)
-        parents.append("Brand Discussion")
-        values.append(count)
-        colors.append(color_map.get(cat, "#95a5a6"))
-        
-        # Add top 3 keywords per category
-        for kw in sorted(category_keywords[cat], key=lambda x: -x['mentions'])[:3]:
-            labels.append(kw['keyword'])
-            parents.append(cat)
-            values.append(kw['mentions'])
-            colors.append(color_map.get(cat, "#95a5a6"))
-    
-    fig = go.Figure(go.Sunburst(
-        labels=labels,
-        parents=parents,
-        values=values,
-        marker=dict(colors=colors, line=dict(color='white', width=2)),
-        branchvalues="total",
-        hovertemplate='<b>%{label}</b><br>Mentions: %{value}<br>Percentage: %{percentParent}<extra></extra>'
-    ))
-    
-    fig.update_layout(
-        title=dict(
-            text="<b>Brand Discussion Breakdown</b>",
-            font=dict(size=16, family='Source Sans Pro', color='#1a1a1a'),
-            x=0.5,
-            xanchor='center'
-        ),
-        height=550,
-        paper_bgcolor='rgba(0,0,0,0)',
-        font=dict(family='Source Sans Pro', size=12),
-        margin=dict(l=50, r=50, t=60, b=50)
-    )
-    
-    return fig
 
-def create_priority_matrix(keyword_data: List[Dict]):
-    """Professional scatter plot for priority matrix"""
-    if not PLOTLY_AVAILABLE or not keyword_data:
-        return None
-    
-    df = pd.DataFrame(keyword_data)
-    
-    # Color by priority
-    color_map = {
-        'High': '#e74c3c',
-        'Medium': '#f39c12',
-        'Low': '#3498db'
-    }
-    
-    fig = px.scatter(
-        df,
-        x='mentions',
-        y='sentiment_score',
-        size='mentions',
-        color='priority',
-        hover_name='keyword',
-        hover_data={
-            'category': True,
-            'mentions': True,
-            'sentiment_score': ':.2f',
-            'priority': False
-        },
-        color_discrete_map=color_map,
-        size_max=60
-    )
-    
-    # Add quadrant lines
-    max_mentions = df['mentions'].max()
-    fig.add_hline(y=0, line_dash="dash", line_color="#6c757d", opacity=0.3)
-    fig.add_vline(x=5, line_dash="dash", line_color="#6c757d", opacity=0.3)
-    
-    # Quadrant labels
-    fig.add_annotation(
-        x=max_mentions * 0.8, y=0.7,
-        text="High Freq + Positive<br>Amplify Strengths",
-        showarrow=False,
-        font=dict(size=10, color="#27ae60"),
-        bgcolor="rgba(255,255,255,0.8)",
-        borderpad=4
-    )
-    
-    fig.add_annotation(
-        x=max_mentions * 0.8, y=-0.7,
-        text="High Freq + Negative<br>Critical Focus",
-        showarrow=False,
-        font=dict(size=10, color="#e74c3c"),
-        bgcolor="rgba(255,255,255,0.8)",
-        borderpad=4
-    )
-    
-    fig.update_layout(
-        title=dict(
-            text="<b>Strategic Priority Matrix</b>",
-            font=dict(size=16, family='Source Sans Pro', color='#1a1a1a'),
-            x=0,
-            xanchor='left'
-        ),
-        xaxis=dict(
-            title="Mention Frequency",
-            showgrid=True,
-            gridcolor='#f1f3f5'
-        ),
-        yaxis=dict(
-            title="Sentiment Score (-1 to +1)",
-            showgrid=True,
-            gridcolor='#f1f3f5',
-            zeroline=True,
-            zerolinecolor='#6c757d'
-        ),
-        height=500,
-        showlegend=True,
-        legend=dict(
-            title="Priority Level",
-            orientation="v",
-            yanchor="top",
-            y=1,
-            xanchor="right",
-            x=1.15,
-            font=dict(size=11, family='Source Sans Pro')
-        ),
-        paper_bgcolor='rgba(0,0,0,0)',
-        plot_bgcolor='white',
-        font=dict(family='Source Sans Pro', size=12),
-        margin=dict(l=60, r=150, t=60, b=60)
-    )
-    
-    return fig
+@st.cache_data(show_spinner=False)
+def compute_sentiments(df: pd.DataFrame, mapping: Dict[str, Optional[str]], use_llm: bool, groq_model: str) -> pd.DataFrame:
+    out = df.copy()
 
-# ============================================================
-# 📱 STREAMLIT APP
-# ============================================================
+    # If sentiment column exists and is usable, standardize it
+    sent_col = mapping.get("sentiment_label")
+    if sent_col and sent_col in out.columns:
+        standardized = out[sent_col].map(standardize_sentiment_label)
+        if standardized.notna().mean() > 0.6:
+            out["_sentiment"] = standardized.fillna("neutral")
+            return out
 
-st.set_page_config(
-    page_title="Brand Intelligence Platform",
-    page_icon="📊",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
+    # Otherwise: rule-based sentiment (fast, deterministic)
+    text_col = mapping.get("comment_text")
+    if not text_col:
+        out["_sentiment"] = "neutral"
+        return out
 
-# Apply professional UI
-apply_cision_ui()
+    texts = out[text_col].astype(str).fillna("").tolist()
 
-# Header
-st.markdown('<div class="main-header">📊 Brand Intelligence Platform</div>', unsafe_allow_html=True)
-st.markdown('<div class="sub-header">Professional Consulting-Grade Analytics · Strategic Insights · Data-Driven Decisions</div>', unsafe_allow_html=True)
-
-# ============================================================
-# SIDEBAR CONFIGURATION
-# ============================================================
-
-with st.sidebar:
-    st.markdown("### ⚙️ Configuration")
-    
-    data_source = st.selectbox(
-        "Data Source",
-        ["🔍 Xiaohongshu", "🛒 E-commerce Reviews", "📱 Social Media", "💬 Customer Feedback"],
-        index=0
-    )
-    
-    st.markdown("---")
-    st.markdown("### 🏢 Brand Settings")
-    
-    primary_brand = st.text_input("Primary Brand", value="YSL", help="Enter your brand name")
-    
-    enable_competitor = st.checkbox("Enable Competitor Analysis", value=False)
-    
-    if enable_competitor:
-        competitor_brand = st.text_input("Competitor Brand", value="Dior")
-    else:
-        competitor_brand = ""
-    
-    st.markdown("---")
-    
-    with st.expander("🔧 Advanced Settings"):
-        min_frequency = st.slider("Min Keyword Frequency", 1, 5, 2, help="Minimum times a keyword must appear")
-        top_n_keywords = st.slider("Top N Keywords", 10, 50, 30, help="Number of keywords to display")
-        enable_wordcloud = st.checkbox("Enable Word Cloud", value=True)
-    
-    st.markdown("---")
-    st.markdown("### 📊 System Status")
-    
-    if PLOTLY_AVAILABLE:
-        st.success("✅ Plotly Charts")
-    else:
-        st.error("❌ Plotly Missing")
-        
-    if JIEBA_AVAILABLE:
-        st.success("✅ Chinese Segmentation")
-    else:
-        st.warning("⚠️ Jieba Missing")
-        
-    if WORDCLOUD_AVAILABLE:
-        st.success("✅ Word Cloud")
-    else:
-        st.warning("⚠️ WordCloud Missing")
-
-# ============================================================
-# SESSION STATE
-# ============================================================
-
-if 'analysis_results' not in st.session_state:
-    st.session_state.analysis_results = None
-
-# ============================================================
-# MAIN TABS
-# ============================================================
-
-tab_input, tab_overview, tab_keywords, tab_sentiment, tab_insights, tab_export = st.tabs([
-    "📥 Data Input",
-    "📊 Overview",
-    "🔑 Keyword Analysis",
-    "😊 Sentiment Analysis",
-    "💡 Strategic Insights",
-    "📄 Export Report"
-])
-
-# ============================================================
-# TAB 1: DATA INPUT
-# ============================================================
-
-with tab_input:
-    st.markdown('<div class="section-header">Data Input</div>', unsafe_allow_html=True)
-    
-    st.markdown("""
-    <div class="info-box">
-        <div class="info-box-title">📖 Instructions</div>
-        Upload your brand comments data via CSV or paste manually. The system will automatically clean, deduplicate, and analyze the data.<br>
-        <strong>Recommended sample size:</strong> 30+ comments for reliable insights.
-    </div>
-    """, unsafe_allow_html=True)
-    
-    def load_brand_data(label: str, key: str) -> List[str]:
-        """Load data for a brand"""
-        st.markdown(f"#### {label}")
-        
-        input_method = st.radio(
-            "Input Method",
-            ["📁 CSV Upload", "✍️ Manual Input"],
-            horizontal=True,
-            key=f"{key}_method"
-        )
-        
-        posts = []
-        
-        if input_method == "📁 CSV Upload":
-            uploaded_file = st.file_uploader(
-                f"Upload CSV for {label}",
-                type=["csv"],
-                key=f"{key}_file",
-                help="CSV must contain a 'text' column with comments"
-            )
-            
-            if uploaded_file:
-                try:
-                    df = pd.read_csv(uploaded_file)
-                    
-                    # Let user select text column
-                    text_col = st.selectbox(
-                        "Select text column",
-                        df.columns.tolist(),
-                        key=f"{key}_col"
+    # Optional LLM sentiment (only if configured & requested)
+    if use_llm and Groq is not None:
+        api_key = st.secrets.get("GROQ_API_KEY") if hasattr(st, "secrets") else None
+        api_key = api_key or os.environ.get("GROQ_API_KEY")
+        if api_key:
+            try:
+                client = Groq(api_key=api_key)
+                labels = []
+                # batch in small chunks
+                chunk_size = 25
+                for i in range(0, len(texts), chunk_size):
+                    chunk = texts[i:i+chunk_size]
+                    prompt = (
+                        "You are a strict sentiment classifier. "
+                        "Classify each Chinese comment into one label: positive, neutral, negative. "
+                        "Return ONLY a JSON array of strings, same length as input.\n\n"
+                        f"Input comments:\n{chunk}"
                     )
-                    
-                    raw_posts = df[text_col].dropna().astype(str).tolist()
-                    
-                    # Clean and deduplicate
-                    seen = set()
-                    for post in raw_posts:
-                        post = post.strip()
-                        if len(post) >= 5 and post not in seen:
-                            posts.append(post)
-                            seen.add(post)
-                    
-                    # Show metrics
-                    col1, col2, col3 = st.columns(3)
-                    col1.metric("Raw Rows", len(raw_posts))
-                    col2.metric("Clean Posts", len(posts))
-                    col3.metric("Removed", len(raw_posts) - len(posts))
-                    
-                except Exception as e:
-                    st.error(f"❌ Failed to load: {str(e)}")
-        
-        else:
-            # Manual input
-            raw_text = st.text_area(
-                "Paste comments (one per line)",
-                height=250,
-                key=f"{key}_textarea",
-                placeholder="Enter comments here...\nOne comment per line"
-            )
-            
-            if raw_text.strip():
-                lines = raw_text.strip().split('\n')
-                seen = set()
-                for line in lines:
-                    line = line.strip()
-                    if len(line) >= 5 and line not in seen:
-                        posts.append(line)
-                        seen.add(line)
-                
-                if posts:
-                    st.success(f"✅ Loaded {len(posts)} comments")
-        
-        return posts
-    
-    # Load data for primary and competitor
-    col_brand1, col_brand2 = st.columns(2)
-    
-    with col_brand1:
-        primary_posts = load_brand_data(f"🎯 {primary_brand}", "primary")
-    
-    with col_brand2:
-        if enable_competitor:
-            competitor_posts = load_brand_data(f"🔄 {competitor_brand}", "competitor")
-        else:
-            competitor_posts = []
+                    resp = client.chat.completions.create(
+                        model=groq_model,
+                        messages=[{"role": "user", "content": prompt}],
+                        temperature=0,
+                    )
+                    raw = resp.choices[0].message.content.strip()
+                    # try to extract json array
+                    import json
+                    arr = json.loads(raw)
+                    for lab in arr:
+                        lab2 = standardize_sentiment_label(lab) or "neutral"
+                        labels.append(lab2)
+                if len(labels) == len(texts):
+                    out["_sentiment"] = labels
+                    return out
+            except Exception:
+                pass  # fallback to rule-based
 
-# ============================================================
-# TAB 2: OVERVIEW
-# ============================================================
+    out["_sentiment"] = [rule_based_sentiment(t) for t in texts]
+    return out
 
-with tab_overview:
-    st.markdown('<div class="section-header">Analysis Overview</div>', unsafe_allow_html=True)
-    
-    if st.button("🚀 Run Analysis", type="primary", use_container_width=True):
-        if 'primary_posts' not in locals() or not primary_posts:
-            st.error("⚠️ Please provide primary brand data in the Data Input tab")
-            st.stop()
-        
-        with st.spinner("🔄 Analyzing data..."):
-            brand_names = [primary_brand]
-            if enable_competitor and competitor_brand:
-                brand_names.append(competitor_brand)
-            
-            # Analyze primary brand
-            primary_keywords = extract_top_keywords_enhanced(
-                primary_posts,
-                brand_names,
-                min_frequency=min_frequency,
-                top_n=top_n_keywords
-            )
-            primary_sentiment = calculate_sentiment_distribution(primary_posts)
-            
-            # Analyze competitor if enabled
-            if enable_competitor and competitor_posts:
-                competitor_keywords = extract_top_keywords_enhanced(
-                    competitor_posts,
-                    brand_names,
-                    min_frequency=min_frequency,
-                    top_n=top_n_keywords
-                )
-                competitor_sentiment = calculate_sentiment_distribution(competitor_posts)
-            else:
-                competitor_keywords = []
-                competitor_sentiment = {}
-            
-            # Store results
-            st.session_state.analysis_results = {
-                "primary": {
-                    "brand": primary_brand,
-                    "posts": primary_posts,
-                    "keywords": primary_keywords,
-                    "sentiment": primary_sentiment
-                },
-                "competitor": {
-                    "brand": competitor_brand,
-                    "posts": competitor_posts,
-                    "keywords": competitor_keywords,
-                    "sentiment": competitor_sentiment
-                } if enable_competitor and competitor_posts else None,
-                "brand_names": brand_names
-            }
-            
-            st.success("✅ Analysis completed!")
-            st.rerun()
-    
-    # Display results
-    if st.session_state.analysis_results:
-        results = st.session_state.analysis_results
-        primary_data = results["primary"]
-        
-        st.markdown("---")
-        
-        # Key metrics
-        col1, col2, col3, col4 = st.columns(4)
-        
-        with col1:
-            st.markdown(f"""
-            <div class="metric-card">
-                <div class="metric-label">Sample Size</div>
-                <div class="metric-value">{len(primary_data['posts'])}</div>
-                <div class="metric-delta">{primary_data['sentiment']['confidence']}</div>
-            </div>
-            """, unsafe_allow_html=True)
-        
-        with col2:
-            net_sent = primary_data['sentiment']['net_sentiment']
-            color = "#27ae60" if net_sent > 0.2 else "#e74c3c" if net_sent < -0.2 else "#f39c12"
-            st.markdown(f"""
-            <div class="metric-card">
-                <div class="metric-label">Net Sentiment</div>
-                <div class="metric-value" style="color:{color};">{net_sent:.2f}</div>
-                <div class="metric-delta">{primary_data['sentiment']['positive_pct']:.0%} Positive</div>
-            </div>
-            """, unsafe_allow_html=True)
-        
-        with col3:
-            high_priority = sum(1 for kw in primary_data['keywords'] if kw['priority'] == 'High')
-            color = "#e74c3c" if high_priority > 0 else "#27ae60"
-            st.markdown(f"""
-            <div class="metric-card">
-                <div class="metric-label">High Priority</div>
-                <div class="metric-value" style="color:{color};">{high_priority}</div>
-                <div class="metric-delta">Requires attention</div>
-            </div>
-            """, unsafe_allow_html=True)
-        
-        with col4:
-            st.markdown(f"""
-            <div class="metric-card">
-                <div class="metric-label">Keywords Identified</div>
-                <div class="metric-value">{len(primary_data['keywords'])}</div>
-                <div class="metric-delta">Top {top_n_keywords}</div>
-            </div>
-            """, unsafe_allow_html=True)
-        
-        st.markdown("---")
-        
-        # Sentiment Gauge
-        if PLOTLY_AVAILABLE:
-            st.markdown('<div class="chart-container">', unsafe_allow_html=True)
-            fig_gauge = create_sentiment_gauge(primary_data['sentiment'], primary_brand)
-            if fig_gauge:
-                st.plotly_chart(fig_gauge, use_container_width=True)
-            st.markdown('</div>', unsafe_allow_html=True)
 
-# ============================================================
-# TAB 3: KEYWORD ANALYSIS
-# ============================================================
-
-with tab_keywords:
-    st.markdown('<div class="section-header">Keyword Analysis</div>', unsafe_allow_html=True)
-    
-    if not st.session_state.analysis_results:
-        st.info("👈 Please run analysis in the Overview tab first")
-        st.stop()
-    
-    results = st.session_state.analysis_results
-    primary_data = results["primary"]
-    
-    st.markdown("""
-    <div class="info-box">
-        <div class="info-box-title">📖 How to Read</div>
-        <strong>Mention Frequency:</strong> Number of comments containing this keyword<br>
-        <strong>Category:</strong> Business dimension (Product Experience, Value, Packaging, etc.)<br>
-        <strong>Sentiment Score:</strong> -1 (completely negative) to +1 (completely positive)<br>
-        <strong>Priority:</strong> Based on frequency - High (≥10), Medium (5-9), Low (2-4)
-    </div>
-    """, unsafe_allow_html=True)
-    
-    # Word Cloud
-    if enable_wordcloud and WORDCLOUD_AVAILABLE:
-        st.markdown('<div class="chart-container">', unsafe_allow_html=True)
-        st.markdown('<div class="chart-title">Keyword Word Cloud</div>', unsafe_allow_html=True)
-        
-        wc_fig = create_word_cloud_fixed(
-            primary_data['posts'],
-            results['brand_names'],
-            f"{primary_brand} - Key Discussion Topics"
-        )
-        
-        if wc_fig:
-            st.pyplot(wc_fig)
-            plt.close()
-        else:
-            st.info("No keywords found for word cloud generation")
-        
-        st.markdown('</div>', unsafe_allow_html=True)
-    
-    # Keyword Frequency Chart
-    if PLOTLY_AVAILABLE and primary_data['keywords']:
-        st.markdown('<div class="chart-container">', unsafe_allow_html=True)
-        fig_freq = create_keyword_frequency_chart(primary_data['keywords'], top_n=15)
-        if fig_freq:
-            st.plotly_chart(fig_freq, use_container_width=True)
-        st.markdown('</div>', unsafe_allow_html=True)
-    
-    # Priority Matrix
-    if PLOTLY_AVAILABLE and primary_data['keywords']:
-        st.markdown('<div class="chart-container">', unsafe_allow_html=True)
-        fig_matrix = create_priority_matrix(primary_data['keywords'])
-        if fig_matrix:
-            st.plotly_chart(fig_matrix, use_container_width=True)
-        st.markdown('</div>', unsafe_allow_html=True)
-    
-    # Brand Discussion Breakdown (Sunburst)
-    if PLOTLY_AVAILABLE and primary_data['keywords']:
-        st.markdown('<div class="chart-container">', unsafe_allow_html=True)
-        fig_sunburst = create_category_distribution(primary_data['keywords'])
-        if fig_sunburst:
-            st.plotly_chart(fig_sunburst, use_container_width=True)
-        st.markdown('</div>', unsafe_allow_html=True)
-    
-    # Keyword Table
-    st.markdown("---")
-    st.markdown("### Detailed Keyword Analysis")
-    
-    if primary_data['keywords']:
-        df_keywords = pd.DataFrame(primary_data['keywords'])
-        
-        st.dataframe(
-            df_keywords[[
-                "keyword", "mentions", "category", "priority",
-                "sentiment_score", "positive_ratio", "negative_ratio"
-            ]],
-            use_container_width=True,
-            hide_index=True,
-            column_config={
-                "keyword": st.column_config.TextColumn("Keyword", width="medium"),
-                "mentions": st.column_config.NumberColumn("Mentions", format="%d"),
-                "category": st.column_config.TextColumn("Category", width="medium"),
-                "priority": st.column_config.TextColumn("Priority", width="small"),
-                "sentiment_score": st.column_config.ProgressColumn(
-                    "Sentiment",
-                    format="%.2f",
-                    min_value=-1,
-                    max_value=1
-                ),
-                "positive_ratio": st.column_config.ProgressColumn(
-                    "Positive %",
-                    format="%.0%",
-                    min_value=0,
-                    max_value=1
-                ),
-                "negative_ratio": st.column_config.ProgressColumn(
-                    "Negative %",
-                    format="%.0%",
-                    min_value=0,
-                    max_value=1
-                )
-            }
-        )
-
-# ============================================================
-# TAB 4: SENTIMENT ANALYSIS
-# ============================================================
-
-with tab_sentiment:
-    st.markdown('<div class="section-header">Sentiment Analysis</div>', unsafe_allow_html=True)
-    
-    if not st.session_state.analysis_results:
-        st.info("👈 Please run analysis in the Overview tab first")
-        st.stop()
-    
-    results = st.session_state.analysis_results
-    primary_data = results["primary"]
-    
-    st.markdown("""
-    <div class="info-box">
-        <div class="info-box-title">📖 Methodology</div>
-        Sentiment analysis uses rule-based classification with 200+ positive and negative term dictionaries.<br>
-        <strong>Net Sentiment = (Positive - Negative) / Total</strong>, ranging from -1 to +1<br>
-        <strong>Confidence level</strong> depends on sample size: &lt;10 (Low), 10-30 (Medium), ≥30 (High)
-    </div>
-    """, unsafe_allow_html=True)
-    
-    # Sentiment breakdown
-    col_sent1, col_sent2 = st.columns(2)
-    
-    with col_sent1:
-        st.markdown('<div class="chart-container">', unsafe_allow_html=True)
-        if PLOTLY_AVAILABLE:
-            fig_donut = create_sentiment_breakdown_chart(primary_data['sentiment'])
-            if fig_donut:
-                st.plotly_chart(fig_donut, use_container_width=True)
-        st.markdown('</div>', unsafe_allow_html=True)
-    
-    with col_sent2:
-        sent_data = primary_data['sentiment']
-        
-        st.markdown(f"""
-        <div class="metric-card">
-            <div class="metric-label">Positive Comments</div>
-            <div class="metric-value" style="color:#27ae60;">{sent_data['positive_pct']:.1%}</div>
-            <div class="metric-delta">{sent_data['positive']} comments</div>
-        </div>
-        """, unsafe_allow_html=True)
-        
-        st.markdown(f"""
-        <div class="metric-card">
-            <div class="metric-label">Neutral Comments</div>
-            <div class="metric-value" style="color:#95a5a6;">{sent_data['neutral_pct']:.1%}</div>
-            <div class="metric-delta">{sent_data['neutral']} comments</div>
-        </div>
-        """, unsafe_allow_html=True)
-        
-        st.markdown(f"""
-        <div class="metric-card">
-            <div class="metric-label">Negative Comments</div>
-            <div class="metric-value" style="color:#e74c3c;">{sent_data['negative_pct']:.1%}</div>
-            <div class="metric-delta">{sent_data['negative']} comments</div>
-        </div>
-        """, unsafe_allow_html=True)
-    
-    # Sentiment interpretation
-    st.markdown("---")
-    st.markdown("### Strategic Interpretation")
-    
-    net_sent = sent_data['net_sentiment']
-    
-    if net_sent > 0.3:
-        st.markdown("""
-        <div class="info-box" style="border-left-color:#27ae60;">
-            <div class="info-box-title" style="color:#27ae60;">✅ Strong Positive Signal</div>
-            Net Sentiment: {:.1%} | Confidence: {}<br>
-            <strong>Recommendation:</strong> Amplify positive reviews in marketing campaigns. Feature customer testimonials.
-        </div>
-        """.format(net_sent, sent_data['confidence']), unsafe_allow_html=True)
-    elif net_sent > 0:
-        st.markdown("""
-        <div class="info-box" style="border-left-color:#f39c12;">
-            <div class="info-box-title" style="color:#f39c12;">ℹ️ Moderately Positive</div>
-            Net Sentiment: {:.1%} | Confidence: {}<br>
-            <strong>Recommendation:</strong> Maintain current strategy. Address negative drivers to improve further.
-        </div>
-        """.format(net_sent, sent_data['confidence']), unsafe_allow_html=True)
-    elif net_sent > -0.2:
-        st.markdown("""
-        <div class="info-box" style="border-left-color:#e67e22;">
-            <div class="info-box-title" style="color:#e67e22;">⚠️ Mixed Sentiment</div>
-            Net Sentiment: {:.1%} | Confidence: {}<br>
-            <strong>Recommendation:</strong> Investigate negative causes. Enhance positive touchpoints.
-        </div>
-        """.format(net_sent, sent_data['confidence']), unsafe_allow_html=True)
+# =========================
+# Keyword extraction & stats
+# =========================
+def tokenize_cn(text: str) -> List[str]:
+    t = safe_to_str(text)
+    if not t:
+        return []
+    # keep Chinese/letters/numbers as tokens
+    if jieba is not None:
+        tokens = [w.strip() for w in jieba.lcut(t) if w.strip()]
     else:
-        st.markdown("""
-        <div class="info-box" style="border-left-color:#e74c3c;">
-            <div class="info-box-title" style="color:#e74c3c;">🚨 Requires Attention</div>
-            Net Sentiment: {:.1%} | Confidence: {}<br>
-            <strong>Recommendation:</strong> Immediate action required. Address critical negative issues.
-        </div>
-        """.format(net_sent, sent_data['confidence']), unsafe_allow_html=True)
+        # fallback: split by non-word
+        tokens = re.split(r"[^\w\u4e00-\u9fff]+", t)
+        tokens = [w for w in tokens if w]
+    # remove short tokens
+    tokens = [w for w in tokens if len(w) >= 2]
+    return tokens
 
-# ============================================================
-# TAB 5: STRATEGIC INSIGHTS
-# ============================================================
 
-with tab_insights:
-    st.markdown('<div class="section-header">Strategic Insights</div>', unsafe_allow_html=True)
-    
-    if not st.session_state.analysis_results:
-        st.info("👈 Please run analysis in the Overview tab first")
-        st.stop()
-    
-    results = st.session_state.analysis_results
-    primary_data = results["primary"]
-    
-    st.markdown("""
-    <div class="info-box">
-        <div class="info-box-title">📖 Priority Framework</div>
-        System automatically generates prioritized recommendations based on keyword frequency and sentiment.<br>
-        <strong>High Priority (≥10 mentions):</strong> Action within 24-48h<br>
-        <strong>Medium Priority (5-9 mentions):</strong> Plan response within 1 week<br>
-        <strong>Low Priority (2-4 mentions):</strong> Monitor and track over 2 weeks
-    </div>
-    """, unsafe_allow_html=True)
-    
-    # Categorize by priority
-    high_priority = [kw for kw in primary_data['keywords'] if kw['priority'] == 'High']
-    medium_priority = [kw for kw in primary_data['keywords'] if kw['priority'] == 'Medium']
-    low_priority = [kw for kw in primary_data['keywords'] if kw['priority'] == 'Low']
-    
-    # High priority items
-    if high_priority:
-        st.markdown("### 🔴 High Priority Items")
-        
-        for kw in high_priority:
-            sentiment_color = "#27ae60" if kw['sentiment_score'] > 0.2 else "#e74c3c" if kw['sentiment_score'] < -0.2 else "#f39c12"
-            
-            st.markdown(f"""
-            <div class="metric-card" style="border-left:4px solid {sentiment_color};">
-                <h4 style="margin:0 0 0.5rem 0;color:{sentiment_color};">{kw['keyword']} ({kw['category']})</h4>
-                <strong>Mentions:</strong> {kw['mentions']} times<br>
-                <strong>Sentiment:</strong> {kw['sentiment_score']:.2f} (Positive: {kw['positive_ratio']:.0%}, Negative: {kw['negative_ratio']:.0%})<br>
-                <strong>Status:</strong> {kw['status']}<br>
-                <strong>Action:</strong> Immediate response required within 24-48 hours
-            </div>
-            """, unsafe_allow_html=True)
+@st.cache_data(show_spinner=False)
+def build_keyword_stats(df: pd.DataFrame, mapping: Dict[str, Optional[str]], risk_terms: List[str]) -> Dict[str, object]:
+    text_col = mapping.get("comment_text")
+    if not text_col:
+        return {"term_stats": pd.DataFrame(), "kol_term": pd.DataFrame()}
+
+    kol_col = mapping.get("kol_name") or "_kol_fallback"
+    if kol_col not in df.columns:
+        df = df.copy()
+        df[kol_col] = "Unknown"
+
+    # Prepare rows
+    rows = []
+    for _, r in df.iterrows():
+        txt = safe_to_str(r[text_col])
+        sentiment = safe_to_str(r["_sentiment"])
+        kol = safe_to_str(r[kol_col]) or "Unknown"
+        tokens = tokenize_cn(txt)
+        for tok in tokens:
+            rows.append((tok, sentiment, kol, txt))
+
+    if not rows:
+        return {"term_stats": pd.DataFrame(), "kol_term": pd.DataFrame()}
+
+    tmp = pd.DataFrame(rows, columns=["term", "sentiment", "kol_name", "source_text"])
+
+    # Term stats with sentiment ratios
+    pivot = tmp.pivot_table(index="term", columns="sentiment", values="source_text", aggfunc="count", fill_value=0)
+    for c in ["positive", "neutral", "negative"]:
+        if c not in pivot.columns:
+            pivot[c] = 0
+    pivot["freq"] = pivot[["positive", "neutral", "negative"]].sum(axis=1)
+    pivot["neg_ratio"] = np.where(pivot["freq"] > 0, pivot["negative"] / pivot["freq"], 0.0)
+    pivot["pos_ratio"] = np.where(pivot["freq"] > 0, pivot["positive"] / pivot["freq"], 0.0)
+    pivot = pivot.sort_values("freq", ascending=False).reset_index()
+
+    # Mark risk terms (dictionary + computed)
+    risk_set = set(risk_terms)
+    pivot["is_risk_dictionary"] = pivot["term"].apply(lambda x: x in risk_set)
+
+    # computed high risk term rule
+    pivot["is_high_risk_term"] = (pivot["neg_ratio"] > 0.60) & (pivot["freq"] >= 3)
+
+    # keyword x kol heatmap table (top N terms only to keep it readable)
+    top_terms = pivot.head(30)["term"].tolist()
+    sub = tmp[tmp["term"].isin(top_terms)]
+    kol_term = sub.pivot_table(index="kol_name", columns="term", values="source_text", aggfunc="count", fill_value=0)
+
+    return {"term_stats": pivot, "kol_term": kol_term}
+
+
+# =========================
+# Risk scoring
+# =========================
+def log_norm(x: float, max_x: float) -> float:
+    if x <= 0:
+        return 0.0
+    return math.log1p(x) / math.log1p(max_x) if max_x > 0 else 0.0
+
+
+@st.cache_data(show_spinner=False)
+def compute_risk_scores(df: pd.DataFrame, mapping: Dict[str, Optional[str]], term_stats: pd.DataFrame, risk_terms: List[str]) -> Dict[str, object]:
+    # Campaign level
+    total = len(df)
+    neg_ratio = float((df["_sentiment"] == "negative").mean()) if total else 0.0
+
+    # Risk term score based on dictionary hits
+    text_col = mapping.get("comment_text")
+    if not text_col:
+        risk_term_hits = 0
     else:
-        st.success("✅ No high priority issues identified")
-    
-    # Medium priority
-    if medium_priority:
-        st.markdown("---")
-        st.markdown("### 🟠 Medium Priority Items")
-        
-        cols = st.columns(2)
-        for idx, kw in enumerate(medium_priority):
-            with cols[idx % 2]:
-                sentiment_icon = "😊" if kw['sentiment_score'] > 0.2 else "😞" if kw['sentiment_score'] < -0.2 else "😐"
-                
-                st.markdown(f"""
-                <div class="metric-card" style="border-left:4px solid #f39c12;">
-                    <h5 style="margin:0 0 0.5rem 0;">{sentiment_icon} {kw['keyword']}</h5>
-                    <strong>Mentions:</strong> {kw['mentions']}<br>
-                    <strong>Sentiment:</strong> {kw['sentiment_score']:.2f}<br>
-                    <strong>Action:</strong> Plan response within 1 week
-                </div>
-                """, unsafe_allow_html=True)
-    
-    # Low priority (collapsible)
-    if low_priority:
-        with st.expander(f"🟢 Low Priority Items ({len(low_priority)}) - Click to expand"):
-            for kw in low_priority:
-                st.markdown(f"- **{kw['keyword']}** ({kw['category']}): {kw['mentions']} mentions - Monitor and track")
+        risk_set = set(risk_terms)
+        risk_term_hits = 0
+        for txt in df[text_col].astype(str).fillna("").tolist():
+            risk_term_hits += sum(1 for rt in risk_set if rt in txt)
 
-# ============================================================
-# TAB 6: EXPORT REPORT
-# ============================================================
+    # Normalize risk term hits
+    # Use a soft cap so it doesn't explode
+    risk_term_score = clamp(risk_term_hits / 30.0, 0.0, 1.0)  # 30 hits ~ full scale
+    volume_norm = log_norm(total, max_x=max(total, 50))  # normalize to itself or 50 baseline
 
-with tab_export:
-    st.markdown('<div class="section-header">Export Report</div>', unsafe_allow_html=True)
-    
-    if not st.session_state.analysis_results:
-        st.info("👈 Please run analysis in the Overview tab first")
-        st.stop()
-    
-    results = st.session_state.analysis_results
-    primary_data = results["primary"]
-    
-    st.markdown("""
-    <div class="info-box">
-        <div class="info-box-title">📖 Export Options</div>
-        Export analysis results in CSV or JSON format for further processing or reporting.<br>
-        <strong>CSV:</strong> Suitable for Excel viewing and sharing with marketing teams<br>
-        <strong>JSON:</strong> Suitable for technical teams and system integration
-    </div>
-    """, unsafe_allow_html=True)
-    
-    # Prepare export data
-    keywords_df = pd.DataFrame(primary_data['keywords'])
-    
-    summary_data = {
-        "Brand": [primary_brand],
-        "Sample Size": [len(primary_data['posts'])],
-        "Confidence": [primary_data['sentiment']['confidence']],
-        "Net Sentiment": [primary_data['sentiment']['net_sentiment']],
-        "Positive %": [primary_data['sentiment']['positive_pct']],
-        "Negative %": [primary_data['sentiment']['negative_pct']],
-        "High Priority Items": [sum(1 for kw in primary_data['keywords'] if kw['priority'] == 'High')]
+    risk_score = 60 * neg_ratio + 25 * risk_term_score + 15 * volume_norm
+    risk_score = float(clamp(risk_score, 0.0, 100.0))
+
+    def level(score: float) -> str:
+        if score <= 24:
+            return "Low"
+        if score <= 49:
+            return "Medium"
+        if score <= 74:
+            return "High"
+        return "Critical"
+
+    campaign_level = level(risk_score)
+
+    # KOL level scoring
+    kol_col = mapping.get("kol_name")
+    if not kol_col or kol_col not in df.columns:
+        kol_stats = pd.DataFrame()
+    else:
+        g = df.groupby(kol_col, dropna=False)
+        rows = []
+        max_vol = max(g.size().max(), 1)
+        risk_set = set(risk_terms)
+
+        for kol, sub in g:
+            vol = len(sub)
+            neg_r = float((sub["_sentiment"] == "negative").mean()) if vol else 0.0
+            # term hits in this kol
+            hits = 0
+            if text_col:
+                for txt in sub[text_col].astype(str).fillna("").tolist():
+                    hits += sum(1 for rt in risk_set if rt in txt)
+            hits_norm = clamp(hits / 15.0, 0.0, 1.0)  # smaller cap per kol
+            vol_n = log_norm(vol, max_vol)
+            score = float(clamp(60 * neg_r + 25 * hits_norm + 15 * vol_n, 0.0, 100.0))
+            rows.append([kol, vol, neg_r, hits, score, level(score)])
+
+        kol_stats = pd.DataFrame(rows, columns=["kol_name", "comment_volume", "negative_ratio", "risk_term_hits", "risk_score", "risk_level"])
+        kol_stats = kol_stats.sort_values("risk_score", ascending=False)
+
+    return {
+        "campaign": {
+            "risk_score": risk_score,
+            "risk_level": campaign_level,
+            "negative_ratio": neg_ratio,
+            "risk_term_hits": int(risk_term_hits),
+            "total_comments": int(total),
+        },
+        "kol_stats": kol_stats,
     }
-    summary_df = pd.DataFrame(summary_data)
-    
-    # Download buttons
-    col_dl1, col_dl2, col_dl3 = st.columns(3)
-    
-    with col_dl1:
-        st.download_button(
-            label="📥 Download Keywords CSV",
-            data=keywords_df.to_csv(index=False).encode('utf-8-sig'),
-            file_name=f"{primary_brand}_keywords_{date.today()}.csv",
-            mime="text/csv",
-            use_container_width=True
-        )
-    
-    with col_dl2:
-        st.download_button(
-            label="📥 Download Summary CSV",
-            data=summary_df.to_csv(index=False).encode('utf-8-sig'),
-            file_name=f"{primary_brand}_summary_{date.today()}.csv",
-            mime="text/csv",
-            use_container_width=True
-        )
-    
-    with col_dl3:
-        json_export = json.dumps(results, ensure_ascii=False, indent=2, default=str)
-        st.download_button(
-            label="📥 Download Full JSON",
-            data=json_export.encode('utf-8'),
-            file_name=f"{primary_brand}_analysis_{date.today()}.json",
-            mime="application/json",
-            use_container_width=True
-        )
-    
-    # Preview
-    st.markdown("---")
-    
-    with st.expander("📊 Preview Keywords Analysis"):
-        st.dataframe(keywords_df, use_container_width=True, hide_index=True)
-    
-    with st.expander("📋 Preview Executive Summary"):
-        st.dataframe(summary_df, use_container_width=True, hide_index=True)
 
-# ============================================================
-# FOOTER
-# ============================================================
 
-st.markdown("---")
+# =========================
+# Competitor comparison
+# =========================
+@st.cache_data(show_spinner=False)
+def build_brand_comparison(df: pd.DataFrame, mapping: Dict[str, Optional[str]]) -> pd.DataFrame:
+    brand_col = mapping.get("brand")
+    if not brand_col or brand_col not in df.columns:
+        return pd.DataFrame()
 
-col_footer1, col_footer2, col_footer3 = st.columns(3)
+    g = df.groupby(brand_col)
+    rows = []
+    for brand, sub in g:
+        total = len(sub)
+        neg = float((sub["_sentiment"] == "negative").mean()) if total else 0.0
+        pos = float((sub["_sentiment"] == "positive").mean()) if total else 0.0
+        neu = float((sub["_sentiment"] == "neutral").mean()) if total else 0.0
+        rows.append([brand, total, pos, neu, neg])
 
-with col_footer1:
-    st.markdown("**🎯 Core Features**")
-    st.markdown("""
-    - Advanced Keyword Extraction
-    - Sentiment Analysis
-    - Priority Framework
-    - Visual Analytics
-    - Export Capabilities
-    """)
+    out = pd.DataFrame(rows, columns=["brand", "comments", "positive_ratio", "neutral_ratio", "negative_ratio"])
+    out = out.sort_values("comments", ascending=False)
+    return out
 
-with col_footer2:
-    st.markdown("**📊 Analysis Dimensions**")
-    st.markdown("""
-    - Product Experience
-    - Value Perception
-    - Package Design
-    - Logistics & Delivery
-    - Customer Service
-    - Authenticity
-    - Competitive Position
-    """)
 
-with col_footer3:
-    st.markdown("**💡 Best Practices**")
-    st.markdown("""
-    - Sample size: 30+ comments
-    - Update frequency: Weekly
-    - Focus on high priority
-    - Track sentiment trends
-    - Monitor key categories
-    """)
+# =========================
+# Rendering helpers
+# =========================
+def badge_html(level: str) -> str:
+    level = (level or "").strip().lower()
+    if level == "low":
+        cls = "low"
+    elif level == "medium":
+        cls = "med"
+    elif level == "high":
+        cls = "high"
+    else:
+        cls = "critical"
+    return f'<span class="badge {cls}">{level.title()}</span>'
 
-st.markdown("---")
-st.caption("**Professional Brand Intelligence Platform** | Consulting-Grade Analytics · Strategic Insights · Data-Driven Decisions")
+
+def kpi_card(title: str, value: str, sub: str = ""):
+    st.markdown(
+        f"""
+        <div class="card">
+          <div class="kpi-title">{title}</div>
+          <div class="kpi-value">{value}</div>
+          <div class="kpi-sub">{sub}</div>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
+
+def chart_theme(fig):
+    fig.update_layout(
+        paper_bgcolor="#FFFFFF",
+        plot_bgcolor="#FFFFFF",
+        font=dict(family="Inter, -apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Helvetica, Arial", color="#111111"),
+        margin=dict(l=40, r=20, t=50, b=40),
+        legend=dict(title=None),
+    )
+    fig.update_xaxes(showgrid=True, gridcolor="rgba(0,0,0,0.05)", zeroline=False)
+    fig.update_yaxes(showgrid=True, gridcolor="rgba(0,0,0,0.05)", zeroline=False)
+    return fig
+
+
+# =========================
+# App
+# =========================
+def main():
+    apply_minimal_ui()
+
+    st.title("Aurora Campaign Risk OS")
+    st.caption("AI-driven Campaign Risk Governance Engine")
+
+    with st.sidebar:
+        st.markdown("<div class='section-title'>Configuration</div>", unsafe_allow_html=True)
+        uploaded = st.file_uploader("Upload CSV", type=["csv"])
+        st.markdown("<hr/>", unsafe_allow_html=True)
+
+        st.markdown("<div class='section-title'>Risk Dictionary</div>", unsafe_allow_html=True)
+        use_default_terms = st.checkbox("Use default risk terms", value=True)
+        custom_terms_raw = st.text_area("Add custom risk terms (comma-separated)", value="", height=80)
+        risk_terms = DEFAULT_RISK_TERMS[:] if use_default_terms else []
+        if custom_terms_raw.strip():
+            extra = [t.strip() for t in re.split(r"[，,]+", custom_terms_raw) if t.strip()]
+            risk_terms.extend(extra)
+
+        st.markdown("<hr/>", unsafe_allow_html=True)
+        st.markdown("<div class='section-title'>Optional AI</div>", unsafe_allow_html=True)
+
+        api_key_present = bool((hasattr(st, "secrets") and st.secrets.get("GROQ_API_KEY")) or os.environ.get("GROQ_API_KEY"))
+        use_llm = st.checkbox("Use Groq for sentiment (optional)", value=False, disabled=not api_key_present)
+        groq_model = st.selectbox("Groq model", options=["llama-3.1-70b-versatile", "llama-3.1-8b-instant"], index=0, disabled=not use_llm)
+
+        if not api_key_present:
+            st.markdown("<div class='small-note'>Groq key not detected. Sentiment will use a deterministic rule-based fallback.</div>", unsafe_allow_html=True)
+
+    if not uploaded:
+        st.info("Upload a CSV to start.")
+        st.stop()
+
+    # Load CSV safely
+    try:
+        df_raw = pd.read_csv(uploaded)
+    except Exception:
+        # try utf-8-sig
+        df_raw = pd.read_csv(uploaded, encoding="utf-8-sig")
+
+    if df_raw.empty:
+        st.error("CSV is empty.")
+        st.stop()
+
+    # Normalize column names? (keep original for display, but mapping uses fuzzy)
+    mapping = map_required_columns(df_raw)
+
+    tabs = st.tabs(["Overview", "Data", "KOL Monitor", "Insights", "Actions"])
+
+    # -------------------------
+    # Data tab: mapping & validation
+    # -------------------------
+    with tabs[1]:
+        st.markdown("<div class='section-title'>Data Preview</div>", unsafe_allow_html=True)
+        rep = validate_dataframe(df_raw)
+
+        c1, c2, c3, c4 = st.columns(4)
+        with c1:
+            kpi_card("Rows", str(rep["rows"]))
+        with c2:
+            kpi_card("Columns", str(rep["cols"]))
+        with c3:
+            kpi_card("Empty rows", str(rep["empty_rows"]))
+        with c4:
+            kpi_card("Duplicates", str(rep["duplicates"]))
+
+        st.markdown("<hr/>", unsafe_allow_html=True)
+
+        st.markdown("<div class='section-title'>Field Mapping</div>", unsafe_allow_html=True)
+        st.caption("Auto-detected fields. If any are wrong, adjust below.")
+
+        # Build selectable options
+        all_cols = df_raw.columns.tolist()
+        text_candidates = suggest_text_columns(df_raw)
+
+        # Text column must be string-like
+        default_text = mapping.get("comment_text") if mapping.get("comment_text") in text_candidates else (text_candidates[0] if text_candidates else None)
+        if default_text is None:
+            st.error("No text-like columns found. Your CSV must contain a text comment column (e.g., comment_text/content).")
+            st.stop()
+
+        col_text = st.selectbox("Comment text column", options=text_candidates, index=text_candidates.index(default_text))
+        st.info(f"Selected text column: {col_text}")
+
+        # Other fields (optional)
+        col_kol = st.selectbox("KOL column (optional but recommended)", options=["(none)"] + all_cols,
+                               index=(["(none)"] + all_cols).index(mapping["kol_name"]) if mapping["kol_name"] in all_cols else 0)
+        col_brand = st.selectbox("Brand column (optional, for competitor comparison)", options=["(none)"] + all_cols,
+                                 index=(["(none)"] + all_cols).index(mapping["brand"]) if mapping["brand"] in all_cols else 0)
+        col_campaign = st.selectbox("Campaign column (optional)", options=["(none)"] + all_cols,
+                                    index=(["(none)"] + all_cols).index(mapping["campaign"]) if mapping["campaign"] in all_cols else 0)
+        col_post = st.selectbox("Post ID column (optional)", options=["(none)"] + all_cols,
+                                index=(["(none)"] + all_cols).index(mapping["post_id"]) if mapping["post_id"] in all_cols else 0)
+        col_date = st.selectbox("Created time column (optional, for trend)", options=["(none)"] + all_cols,
+                                index=(["(none)"] + all_cols).index(mapping["created_at"]) if mapping["created_at"] in all_cols else 0)
+        col_sent = st.selectbox("Sentiment label column (optional)", options=["(none)"] + all_cols,
+                                index=(["(none)"] + all_cols).index(mapping["sentiment_label"]) if mapping["sentiment_label"] in all_cols else 0)
+
+        # Save mapping to session
+        mapping_user = {
+            "comment_text": col_text,
+            "kol_name": None if col_kol == "(none)" else col_kol,
+            "brand": None if col_brand == "(none)" else col_brand,
+            "campaign": None if col_campaign == "(none)" else col_campaign,
+            "post_id": None if col_post == "(none)" else col_post,
+            "created_at": None if col_date == "(none)" else col_date,
+            "sentiment_label": None if col_sent == "(none)" else col_sent,
+            "platform": mapping.get("platform"),
+        }
+        st.session_state["mapping_user"] = mapping_user
+
+        st.markdown("<hr/>", unsafe_allow_html=True)
+        st.markdown("<div class='section-title'>Sample Rows</div>", unsafe_allow_html=True)
+        st.dataframe(df_raw.head(30), use_container_width=True)
+
+    # Use mapping from session state
+    mapping_user = st.session_state.get("mapping_user")
+    if not mapping_user:
+        # If user didn't open Data tab, fallback to auto mapping with enforced text col
+        mapping_user = mapping
+        mapping_user["comment_text"] = mapping.get("comment_text") or suggest_text_columns(df_raw)[0]
+        st.session_state["mapping_user"] = mapping_user
+
+    # Enforce and prepare analysis DF
+    try:
+        df = df_raw.copy()
+        df[mapping_user["comment_text"]] = enforce_text_column(df, mapping_user["comment_text"])
+    except Exception as e:
+        st.error(f"Text column selection error: {e}")
+        st.stop()
+
+    # If missing kol, create placeholder
+    if not mapping_user.get("kol_name") or mapping_user["kol_name"] not in df.columns:
+        df["_kol_fallback"] = "Unknown"
+        mapping_user["kol_name"] = "_kol_fallback"
+
+    # Compute sentiment
+    df = compute_sentiments(df, mapping_user, use_llm=bool(use_llm), groq_model=groq_model)
+
+    # Keywords
+    kw = build_keyword_stats(df, mapping_user, risk_terms=risk_terms)
+    term_stats = kw["term_stats"]
+    kol_term = kw["kol_term"]
+
+    # Risk scores
+    risk = compute_risk_scores(df, mapping_user, term_stats=term_stats, risk_terms=risk_terms)
+    campaign = risk["campaign"]
+    kol_stats = risk["kol_stats"]
+
+    # Brand comparison (if brand exists)
+    brand_cmp = build_brand_comparison(df, mapping_user)
+
+    # -------------------------
+    # Overview
+    # -------------------------
+    with tabs[0]:
+        left, right = st.columns([1.2, 1])
+
+        with left:
+            st.markdown("<div class='section-title'>Campaign Health</div>", unsafe_allow_html=True)
+            st.markdown(
+                f"<div class='subtle'>Risk Score</div>"
+                f"<div style='font-size:44px;font-weight:800;margin-top:4px;'>{campaign['risk_score']:.1f}</div>"
+                f"<div style='margin-top:8px;'>{badge_html(campaign['risk_level'])}</div>",
+                unsafe_allow_html=True
+            )
+            st.markdown("<hr/>", unsafe_allow_html=True)
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                kpi_card("Comments", str(campaign["total_comments"]))
+            with c2:
+                kpi_card("Negative ratio", f"{campaign['negative_ratio']*100:.1f}%")
+            with c3:
+                kpi_card("Risk term hits", str(campaign["risk_term_hits"]))
+
+        with right:
+            st.markdown("<div class='section-title'>Sentiment Distribution</div>", unsafe_allow_html=True)
+            dist = df["_sentiment"].value_counts(normalize=True).reindex(["positive", "neutral", "negative"]).fillna(0).reset_index()
+            dist.columns = ["sentiment", "ratio"]
+            fig = px.bar(dist, x="sentiment", y="ratio", text=dist["ratio"].map(lambda x: f"{x*100:.1f}%"))
+            fig.update_traces(textposition="outside")
+            fig = chart_theme(fig)
+            st.plotly_chart(fig, use_container_width=True)
+
+        st.markdown("<hr/>", unsafe_allow_html=True)
+
+        colA, colB = st.columns([1, 1])
+
+        with colA:
+            st.markdown("<div class='section-title'>Top Risk KOL</div>", unsafe_allow_html=True)
+            if isinstance(kol_stats, pd.DataFrame) and not kol_stats.empty:
+                st.dataframe(kol_stats.head(10), use_container_width=True)
+            else:
+                st.caption("KOL column not available or insufficient data.")
+
+        with colB:
+            st.markdown("<div class='section-title'>Top Risk Terms</div>", unsafe_allow_html=True)
+            if isinstance(term_stats, pd.DataFrame) and not term_stats.empty:
+                risk_terms_df = term_stats[term_stats["is_high_risk_term"]].copy()
+                risk_terms_df = risk_terms_df.sort_values(["neg_ratio", "freq"], ascending=[False, False]).head(15)
+                show_cols = ["term", "freq", "neg_ratio", "is_risk_dictionary", "is_high_risk_term"]
+                if risk_terms_df.empty:
+                    st.caption("No high-risk terms detected with current thresholds (neg_ratio > 60% and freq >= 3).")
+                    st.dataframe(term_stats.head(15)[["term","freq","neg_ratio","pos_ratio"]], use_container_width=True)
+                else:
+                    risk_terms_df["neg_ratio"] = (risk_terms_df["neg_ratio"]*100).round(1).astype(str) + "%"
+                    st.dataframe(risk_terms_df[show_cols], use_container_width=True)
+            else:
+                st.caption("Keyword stats unavailable (jieba missing or no text).")
+
+        # Competitor comparison
+        if isinstance(brand_cmp, pd.DataFrame) and not brand_cmp.empty and brand_cmp["brand"].nunique() > 1:
+            st.markdown("<hr/>", unsafe_allow_html=True)
+            st.markdown("<div class='section-title'>Brand Comparison</div>", unsafe_allow_html=True)
+            fig = px.bar(
+                brand_cmp,
+                x="brand",
+                y="negative_ratio",
+                text=brand_cmp["negative_ratio"].map(lambda x: f"{x*100:.1f}%"),
+            )
+            fig.update_traces(textposition="outside")
+            fig = chart_theme(fig)
+            st.plotly_chart(fig, use_container_width=True)
+
+    # -------------------------
+    # KOL Monitor
+    # -------------------------
+    with tabs[2]:
+        st.markdown("<div class='section-title'>KOL Monitor</div>", unsafe_allow_html=True)
+        st.caption("Ranked by risk score (0–100). Drill down to see drivers and evidence.")
+
+        if kol_stats is None or (isinstance(kol_stats, pd.DataFrame) and kol_stats.empty):
+            st.info("KOL monitor is not available because KOL column is missing or empty.")
+        else:
+            st.dataframe(kol_stats, use_container_width=True)
+
+            st.markdown("<hr/>", unsafe_allow_html=True)
+            st.markdown("<div class='section-title'>KOL Drill-down</div>", unsafe_allow_html=True)
+            kol_list = kol_stats["kol_name"].tolist()
+            selected_kol = st.selectbox("Select a KOL", options=kol_list)
+
+            sub = df[df[mapping_user["kol_name"]] == selected_kol].copy()
+            st.markdown(f"<div class='subtle'>Comments: {len(sub)}</div>", unsafe_allow_html=True)
+
+            # Show sentiment distribution for this KOL
+            dist = sub["_sentiment"].value_counts(normalize=True).reindex(["positive", "neutral", "negative"]).fillna(0).reset_index()
+            dist.columns = ["sentiment", "ratio"]
+            fig = px.bar(dist, x="sentiment", y="ratio", text=dist["ratio"].map(lambda x: f"{x*100:.1f}%"))
+            fig.update_traces(textposition="outside")
+            fig = chart_theme(fig)
+            st.plotly_chart(fig, use_container_width=True)
+
+            # Evidence comments: show negative first
+            text_col = mapping_user["comment_text"]
+            neg_comments = sub[sub["_sentiment"] == "negative"][text_col].astype(str).head(20).tolist()
+            neu_comments = sub[sub["_sentiment"] == "neutral"][text_col].astype(str).head(10).tolist()
+
+            st.markdown("<div class='section-title'>Evidence (Negative)</div>", unsafe_allow_html=True)
+            if neg_comments:
+                for i, c in enumerate(neg_comments, 1):
+                    st.write(f"{i}. {c}")
+            else:
+                st.caption("No negative comments found for this KOL.")
+
+            st.markdown("<div class='section-title'>Neutral Signals</div>", unsafe_allow_html=True)
+            if neu_comments:
+                for i, c in enumerate(neu_comments, 1):
+                    st.write(f"{i}. {c}")
+            else:
+                st.caption("No neutral comments found for this KOL.")
+
+    # -------------------------
+    # Insights
+    # -------------------------
+    with tabs[3]:
+        st.markdown("<div class='section-title'>Insights</div>", unsafe_allow_html=True)
+        st.caption("Keyword intelligence and structured charts. Word cloud is intentionally not a primary module.")
+
+        if term_stats is None or term_stats.empty:
+            st.info("Keyword stats not available. Please ensure jieba is installed and comment_text contains Chinese text.")
+        else:
+            c1, c2 = st.columns([1, 1])
+
+            with c1:
+                st.markdown("<div class='section-title'>Negative Keywords</div>", unsafe_allow_html=True)
+                neg_top = term_stats.sort_values(["neg_ratio", "freq"], ascending=[False, False]).head(20).copy()
+                neg_top["neg_ratio_pct"] = neg_top["neg_ratio"] * 100
+                fig = px.bar(neg_top, x="neg_ratio_pct", y="term", orientation="h")
+                fig = chart_theme(fig)
+                fig.update_layout(xaxis_title="Negative ratio (%)", yaxis_title="")
+                st.plotly_chart(fig, use_container_width=True)
+
+            with c2:
+                st.markdown("<div class='section-title'>Opportunity Keywords</div>", unsafe_allow_html=True)
+                pos_top = term_stats.sort_values(["pos_ratio", "freq"], ascending=[False, False]).head(20).copy()
+                pos_top["pos_ratio_pct"] = pos_top["pos_ratio"] * 100
+                fig = px.bar(pos_top, x="pos_ratio_pct", y="term", orientation="h")
+                fig = chart_theme(fig)
+                fig.update_layout(xaxis_title="Positive ratio (%)", yaxis_title="")
+                st.plotly_chart(fig, use_container_width=True)
+
+            st.markdown("<hr/>", unsafe_allow_html=True)
+
+            # Keyword x KOL heatmap
+            st.markdown("<div class='section-title'>Keyword × KOL Matrix</div>", unsafe_allow_html=True)
+            if kol_term is None or kol_term.empty:
+                st.caption("Not enough data to build heatmap.")
+            else:
+                # keep top 15 KOL to fit
+                kol_term_view = kol_term.copy()
+                if kol_term_view.shape[0] > 15:
+                    kol_term_view = kol_term_view.loc[kol_term_view.sum(axis=1).sort_values(ascending=False).head(15).index]
+                fig = px.imshow(
+                    kol_term_view.values,
+                    x=kol_term_view.columns.tolist(),
+                    y=kol_term_view.index.tolist(),
+                    aspect="auto",
+                )
+                fig = chart_theme(fig)
+                fig.update_layout(xaxis_title="Keyword", yaxis_title="KOL")
+                st.plotly_chart(fig, use_container_width=True)
+
+            # Sentiment stacked chart by brand (if available)
+            brand_col = mapping_user.get("brand")
+            if brand_col and brand_col in df.columns and df[brand_col].nunique() > 1:
+                st.markdown("<hr/>", unsafe_allow_html=True)
+                st.markdown("<div class='section-title'>Sentiment by Brand</div>", unsafe_allow_html=True)
+                pivot = (
+                    df.groupby([brand_col, "_sentiment"])
+                    .size()
+                    .reset_index(name="count")
+                )
+                total = pivot.groupby(brand_col)["count"].transform("sum")
+                pivot["ratio"] = pivot["count"] / total
+                fig = px.bar(pivot, x=brand_col, y="ratio", color="_sentiment", barmode="stack")
+                fig = chart_theme(fig)
+                fig.update_layout(yaxis_tickformat=".0%")
+                st.plotly_chart(fig, use_container_width=True)
+
+    # -------------------------
+    # Actions
+    # -------------------------
+    with tabs[4]:
+        st.markdown("<div class='section-title'>Actions</div>", unsafe_allow_html=True)
+        st.caption("Decision support recommendations based on risk level and drivers.")
+
+        level = campaign["risk_level"].lower()
+        drivers = []
+
+        # drivers from term stats
+        if isinstance(term_stats, pd.DataFrame) and not term_stats.empty:
+            high_risk_terms = term_stats[term_stats["is_high_risk_term"]].sort_values(["neg_ratio", "freq"], ascending=[False, False]).head(5)
+            drivers = high_risk_terms["term"].tolist()
+
+        st.markdown(f"<div class='subtle'>Campaign risk level: {badge_html(campaign['risk_level'])}</div>", unsafe_allow_html=True)
+        st.markdown("<hr/>", unsafe_allow_html=True)
+
+        col1, col2 = st.columns([1.1, 1])
+
+        with col1:
+            st.markdown("<div class='section-title'>Recommended Actions</div>", unsafe_allow_html=True)
+
+            if level in ["low"]:
+                st.write("- Continue monitoring; no immediate intervention required.")
+                st.write("- Capture positive terms as creative angles for next content wave.")
+                st.write("- Prepare a lightweight FAQ for repeated neutral questions.")
+            elif level in ["medium"]:
+                st.write("- Increase monitoring frequency; review top risk terms daily.")
+                st.write("- Coordinate with community managers on response consistency.")
+                st.write("- Identify top 3 risk-contributing KOL and align messaging.")
+            elif level in ["high"]:
+                st.write("- Escalate to PR / Brand safety owner; prepare official statement draft.")
+                st.write("- Contact high-risk KOL for clarification and provide guidance.")
+                st.write("- Set up keyword watchlist; prioritize safety/quality concerns.")
+                st.write("- Consider pausing paid amplification for risky posts.")
+            else:
+                st.write("- Activate crisis protocol immediately.")
+                st.write("- Publish official response with clear facts and next steps.")
+                st.write("- Offer customer support path (refund/exchange/consultation) if applicable.")
+                st.write("- Freeze risky placements and prioritize containment messaging.")
+                st.write("- Start internal root-cause review (batch/quality/ingredient).")
+
+        with col2:
+            st.markdown("<div class='section-title'>Risk Drivers</div>", unsafe_allow_html=True)
+            if drivers:
+                st.write("High-risk terms detected:")
+                for d in drivers:
+                    st.write(f"- {d}")
+            else:
+                st.write("No high-risk terms meet the strict thresholds yet.")
+                st.write("Tip: add custom risk terms in the sidebar if your category has specific issues.")
+
+            st.markdown("<hr/>", unsafe_allow_html=True)
+            st.markdown("<div class='section-title'>One-page Summary (Copy)</div>", unsafe_allow_html=True)
+
+            summary_lines = [
+                f"Campaign Risk Score: {campaign['risk_score']:.1f} ({campaign['risk_level']})",
+                f"Comments: {campaign['total_comments']}",
+                f"Negative ratio: {campaign['negative_ratio']*100:.1f}%",
+                f"Risk term hits: {campaign['risk_term_hits']}",
+            ]
+            if drivers:
+                summary_lines.append("Top risk drivers: " + ", ".join(drivers))
+
+            if isinstance(kol_stats, pd.DataFrame) and not kol_stats.empty:
+                top_kol = kol_stats.iloc[0]
+                summary_lines.append(f"Top risk KOL: {top_kol['kol_name']} (score {top_kol['risk_score']:.1f}, neg {top_kol['negative_ratio']*100:.1f}%)")
+
+            st.code("\n".join(summary_lines), language="text")
+
+
+if __name__ == "__main__":
+    main()
